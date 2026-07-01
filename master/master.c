@@ -481,6 +481,9 @@ void ec_master_clear_slave_configs(ec_master_t *master)
  */
 void ec_master_clear_slaves(ec_master_t *master)
 {
+#ifdef EC_INCREMENTAL_SCAN
+    ec_slave_config_t *sc;
+#endif
     ec_slave_t *slave;
 
     master->dc_ref_clock = NULL;
@@ -502,6 +505,12 @@ void ec_master_clear_slaves(ec_master_t *master)
     master->fsm_slave = NULL;
     INIT_LIST_HEAD(&master->fsm_exec_list);
     master->fsm_exec_count = 0;
+
+#ifdef EC_INCREMENTAL_SCAN
+    list_for_each_entry(sc, &master->configs, list) {
+        ec_slave_config_detach(sc);
+    }
+#endif
 
     for (slave = master->slaves;
             slave < master->slaves + master->slave_count;
