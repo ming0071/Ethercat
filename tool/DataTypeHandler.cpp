@@ -184,7 +184,7 @@ size_t DataTypeHandler::interpretAsType(
                     << dataSize << " > " << targetSize << ")";
                 throw SizeException(err.str());
             }
-            str >> (char *) target;
+            str.read((char *) target, targetSize);
             break;
         case 0x0011: // double
             {
