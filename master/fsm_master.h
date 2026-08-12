@@ -55,6 +55,31 @@ typedef struct {
 
 typedef struct ec_fsm_master ec_fsm_master_t; /**< \see ec_fsm_master */
 
+#ifdef EC_INCREMENTAL_SCAN
+/** Slave identity snapshot taken before an incremental rescan.
+ */
+typedef struct {
+    ec_device_index_t device_index; /**< Device index. */
+    uint16_t ring_position; /**< Ring position. */
+    uint16_t effective_alias; /**< Effective alias address. */
+    uint32_t vendor_id; /**< Vendor ID. */
+    uint32_t product_code; /**< Product code. */
+    uint32_t revision_number; /**< Revision number. */
+    uint32_t serial_number; /**< Serial number. */
+    ec_slave_config_t *config; /**< Attached configuration. */
+    ec_slave_state_t requested_state; /**< Requested application state. */
+    ec_slave_state_t current_state; /**< Current application state. */
+    unsigned int error_flag; /**< Error flag. */
+    unsigned int force_config; /**< Forced configuration flag. */
+    uint16_t configured_rx_mailbox_offset; /**< Configured RX mailbox
+                                             offset. */
+    uint16_t configured_rx_mailbox_size; /**< Configured RX mailbox size. */
+    uint16_t configured_tx_mailbox_offset; /**< Configured TX mailbox
+                                             offset. */
+    uint16_t configured_tx_mailbox_size; /**< Configured TX mailbox size. */
+} ec_fsm_master_slave_snapshot_t;
+#endif
+
 /** Finite state machine of an EtherCAT master.
  */
 struct ec_fsm_master {
@@ -77,6 +102,11 @@ struct ec_fsm_master {
                                                          responding slaves for
                                                          every device. */
     ec_slave_t *slave; /**< current slave */
+#ifdef EC_INCREMENTAL_SCAN
+    ec_fsm_master_slave_snapshot_t *slave_snapshots; /**< Slave snapshots
+                                                       before rescan. */
+    unsigned int slave_snapshot_count; /**< Number of slave snapshots. */
+#endif
     ec_sii_write_request_t *sii_request; /**< SII write request */
     off_t sii_index; /**< index to SII write request data */
     ec_sdo_request_t *sdo_request; /**< SDO request to process. */

@@ -1078,6 +1078,36 @@ AM_CONDITIONAL(ENABLE_EOE, test "x$eoe" = "x1")
 AC_SUBST(ENABLE_EOE, [$eoe])
 
 #-----------------------------------------------------------------------------
+# Incremental slave scanning
+#-----------------------------------------------------------------------------
+
+AC_MSG_CHECKING([whether to preserve unchanged slaves during a rescan])
+
+AC_ARG_ENABLE([incremental-scan],
+    AS_HELP_STRING([--enable-incremental-scan],
+                   [Preserve unchanged slaves during a rescan (default: no)]),
+    [
+        case "${enableval}" in
+            yes) incrementalscan=1
+                ;;
+            no) incrementalscan=0
+                ;;
+            *) AC_MSG_ERROR([Invalid value for --enable-incremental-scan])
+                ;;
+        esac
+    ],
+    [incrementalscan=0]
+)
+
+if test "x${incrementalscan}" = "x1"; then
+    AC_DEFINE([EC_INCREMENTAL_SCAN], [1],
+        [Preserve unchanged slaves during a rescan])
+    AC_MSG_RESULT([yes])
+else
+    AC_MSG_RESULT([no])
+fi
+
+#-----------------------------------------------------------------------------
 # CPU timestamp counter support
 #-----------------------------------------------------------------------------
 
