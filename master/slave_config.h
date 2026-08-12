@@ -125,6 +125,11 @@ struct ec_slave_config {
 
     ec_slave_t *slave; /**< Slave pointer. This is \a NULL, if the slave is
                          offline. */
+#ifdef EC_INCREMENTAL_SCAN
+    unsigned int last_online; /**< Last known online state during scanning. */
+    unsigned int last_operational; /**< Last known operational state. */
+    ec_slave_state_t last_al_state; /**< Last known application state. */
+#endif
 
     ec_sync_config_t sync_configs[EC_MAX_SYNC_MANAGERS]; /**< Sync manager
                                                    configurations. */

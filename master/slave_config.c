@@ -90,6 +90,11 @@ void ec_slave_config_init(
     sc->watchdog_intervals = 0; // use default
 
     sc->slave = NULL;
+#ifdef EC_INCREMENTAL_SCAN
+    sc->last_online = 0;
+    sc->last_operational = 0;
+    sc->last_al_state = EC_SLAVE_STATE_UNKNOWN;
+#endif
 
     for (i = 0; i < EC_MAX_SYNC_MANAGERS; i++)
         ec_sync_config_init(&sc->sync_configs[i]);
@@ -300,6 +305,12 @@ int ec_slave_config_attach(
     // attach slave
     slave->config = sc;
     sc->slave = slave;
+#ifdef EC_INCREMENTAL_SCAN
+    sc->last_online = 1;
+    sc->last_operational =
+        slave->current_state == EC_SLAVE_STATE_OP && !slave->force_config;
+    sc->last_al_state = slave->current_state;
+#endif
 
     EC_CONFIG_DBG(sc, 1, "Attached slave %u.\n", slave->ring_position);
     return 0;
@@ -316,6 +327,13 @@ void ec_slave_config_detach(
     if (sc->slave) {
         ec_reg_request_t *reg;
 
+#ifdef EC_INCREMENTAL_SCAN
+        sc->last_online = 1;
+        sc->last_operational =
+            sc->slave->current_state == EC_SLAVE_STATE_OP
+            && !sc->slave->force_config;
+        sc->last_al_state = sc->slave->current_state;
+#endif
         sc->slave->config = NULL;
 
         // invalidate processing register request
@@ -1386,6 +1404,12 @@ int ecrt_slave_config_state(const ec_slave_config_t *sc,
         state->operational =
             slave->current_state == EC_SLAVE_STATE_OP && !slave->force_config;
         state->al_state = slave->current_state;
+#ifdef EC_INCREMENTAL_SCAN
+    } else if (sc->master->scan_busy && sc->last_online) {
+        state->online = sc->last_online;
+        state->operational = sc->last_operational;
+        state->al_state = sc->last_al_state;
+#endif
     } else {
         state->operational = 0;
         state->al_state = EC_SLAVE_STATE_UNKNOWN;
