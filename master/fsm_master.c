@@ -26,6 +26,10 @@
 /****************************************************************************/
 
 #include "globals.h"
+#ifdef EC_INCREMENTAL_SCAN
+#include <linux/slab.h>
+#endif
+
 #include "master.h"
 #include "mailbox.h"
 #include "slave_config.h"
@@ -52,6 +56,19 @@ int ec_fsm_master_action_process_int_request(ec_fsm_master_t *);
 void ec_fsm_master_action_idle(ec_fsm_master_t *);
 void ec_fsm_master_action_next_slave_state(ec_fsm_master_t *);
 void ec_fsm_master_action_configure(ec_fsm_master_t *);
+#ifdef EC_INCREMENTAL_SCAN
+void ec_fsm_master_clear_slave_snapshots(ec_fsm_master_t *);
+void ec_fsm_master_take_slave_snapshots(ec_fsm_master_t *);
+void ec_fsm_master_restore_slave_snapshot_state(
+        ec_slave_t *, const ec_fsm_master_slave_snapshot_t *);
+int ec_fsm_master_slave_snapshot_matches(
+        const ec_fsm_master_slave_snapshot_t *, const ec_slave_t *);
+int ec_fsm_master_slave_snapshot_identity_matches(
+        const ec_fsm_master_slave_snapshot_t *, const ec_slave_t *);
+ec_fsm_master_slave_snapshot_t *ec_fsm_master_find_slave_snapshot(
+        ec_fsm_master_t *, const ec_slave_t *, uint8_t *);
+void ec_fsm_master_apply_slave_snapshots(ec_fsm_master_t *);
+#endif
 u64 ec_fsm_master_dc_offset32(ec_fsm_master_t *, u64, u64, unsigned long);
 u64 ec_fsm_master_dc_offset64(ec_fsm_master_t *, u64, u64, unsigned long);
 
@@ -96,6 +113,10 @@ void ec_fsm_master_init(
     fsm->retries = 0;
     fsm->scan_jiffies = 0;
     fsm->slave = NULL;
+#ifdef EC_INCREMENTAL_SCAN
+    fsm->slave_snapshots = NULL;
+    fsm->slave_snapshot_count = 0;
+#endif
     fsm->sii_request = NULL;
     fsm->sii_index = 0;
     fsm->sdo_request = NULL;
@@ -136,6 +157,9 @@ void ec_fsm_master_clear(
     ec_fsm_slave_config_clear(&fsm->fsm_slave_config);
     ec_fsm_slave_scan_clear(&fsm->fsm_slave_scan);
     ec_fsm_sii_clear(&fsm->fsm_sii);
+#ifdef EC_INCREMENTAL_SCAN
+    ec_fsm_master_clear_slave_snapshots(fsm);
+#endif
 }
 
 /****************************************************************************/
@@ -199,6 +223,290 @@ int ec_fsm_master_idle(
 }
 
 /****************************************************************************/
+
+#ifdef EC_INCREMENTAL_SCAN
+
+/** Clears slave snapshots.
+ */
+void ec_fsm_master_clear_slave_snapshots(
+        ec_fsm_master_t *fsm /**< Master state machine. */
+        )
+{
+    kfree(fsm->slave_snapshots);
+    fsm->slave_snapshots = NULL;
+    fsm->slave_snapshot_count = 0;
+}
+
+/****************************************************************************/
+
+/** Takes identity snapshots of the current slave list before a rescan.
+ */
+void ec_fsm_master_take_slave_snapshots(
+        ec_fsm_master_t *fsm /**< Master state machine. */
+        )
+{
+    ec_master_t *master = fsm->master;
+    ec_slave_t *slave;
+    ec_fsm_master_slave_snapshot_t *snapshot;
+    unsigned int i, size;
+
+    ec_fsm_master_clear_slave_snapshots(fsm);
+
+    if (!master->slave_count) {
+        return;
+    }
+
+    size = sizeof(ec_fsm_master_slave_snapshot_t) * master->slave_count;
+    fsm->slave_snapshots =
+        (ec_fsm_master_slave_snapshot_t *) kmalloc(size, GFP_KERNEL);
+    if (!fsm->slave_snapshots) {
+        EC_MASTER_WARN(master, "Failed to allocate slave rescan snapshots."
+                " Treating all scanned slaves as changed.\n");
+        return;
+    }
+
+    fsm->slave_snapshot_count = master->slave_count;
+    for (i = 0; i < master->slave_count; i++) {
+        slave = master->slaves + i;
+        snapshot = fsm->slave_snapshots + i;
+
+        snapshot->device_index = slave->device_index;
+        snapshot->ring_position = slave->ring_position;
+        snapshot->effective_alias = slave->effective_alias;
+        snapshot->vendor_id = slave->sii.vendor_id;
+        snapshot->product_code = slave->sii.product_code;
+        snapshot->revision_number = slave->sii.revision_number;
+        snapshot->serial_number = slave->sii.serial_number;
+        snapshot->config = slave->config;
+        snapshot->requested_state = slave->requested_state;
+        snapshot->current_state = slave->current_state;
+        snapshot->error_flag = slave->error_flag;
+        snapshot->force_config = slave->force_config;
+        snapshot->configured_rx_mailbox_offset =
+            slave->configured_rx_mailbox_offset;
+        snapshot->configured_rx_mailbox_size =
+            slave->configured_rx_mailbox_size;
+        snapshot->configured_tx_mailbox_offset =
+            slave->configured_tx_mailbox_offset;
+        snapshot->configured_tx_mailbox_size =
+            slave->configured_tx_mailbox_size;
+    }
+}
+
+/****************************************************************************/
+
+/** Restores volatile state from a previous slave snapshot.
+ */
+void ec_fsm_master_restore_slave_snapshot_state(
+        ec_slave_t *slave,
+        const ec_fsm_master_slave_snapshot_t *snapshot
+        )
+{
+    slave->requested_state = snapshot->requested_state;
+    slave->current_state = snapshot->current_state;
+    slave->error_flag = snapshot->error_flag;
+    slave->force_config = snapshot->force_config;
+    slave->configured_rx_mailbox_offset =
+        snapshot->configured_rx_mailbox_offset;
+    slave->configured_rx_mailbox_size =
+        snapshot->configured_rx_mailbox_size;
+    slave->configured_tx_mailbox_offset =
+        snapshot->configured_tx_mailbox_offset;
+    slave->configured_tx_mailbox_size =
+        snapshot->configured_tx_mailbox_size;
+}
+
+/****************************************************************************/
+
+/** Returns non-zero if a scanned slave matches a previous snapshot.
+ */
+int ec_fsm_master_slave_snapshot_matches(
+        const ec_fsm_master_slave_snapshot_t *snapshot,
+        const ec_slave_t *slave
+        )
+{
+    return snapshot->device_index == slave->device_index
+        && snapshot->ring_position == slave->ring_position
+        && ec_fsm_master_slave_snapshot_identity_matches(snapshot, slave);
+}
+
+/****************************************************************************/
+
+/** Returns non-zero if a scanned slave matches a previous snapshot by
+ * identity, ignoring the ring position.
+ */
+int ec_fsm_master_slave_snapshot_identity_matches(
+        const ec_fsm_master_slave_snapshot_t *snapshot,
+        const ec_slave_t *slave
+        )
+{
+    return snapshot->device_index == slave->device_index
+        && snapshot->effective_alias == slave->effective_alias
+        && snapshot->vendor_id == slave->sii.vendor_id
+        && snapshot->product_code == slave->sii.product_code
+        && snapshot->revision_number == slave->sii.revision_number
+        && snapshot->serial_number == slave->sii.serial_number;
+}
+
+/****************************************************************************/
+
+/** Finds a previous snapshot for a scanned slave.
+ */
+ec_fsm_master_slave_snapshot_t *ec_fsm_master_find_slave_snapshot(
+        ec_fsm_master_t *fsm, /**< Master state machine. */
+        const ec_slave_t *slave, /**< Scanned slave. */
+        uint8_t *snapshot_used /**< Already matched snapshots. */
+        )
+{
+    ec_fsm_master_slave_snapshot_t *snapshot;
+    unsigned int i;
+
+    i = slave - fsm->master->slaves;
+    if (i < fsm->slave_snapshot_count && !snapshot_used[i]) {
+        snapshot = fsm->slave_snapshots + i;
+        if (ec_fsm_master_slave_snapshot_matches(snapshot, slave)) {
+            snapshot_used[i] = 1;
+            return snapshot;
+        }
+    }
+
+    for (i = 0; i < fsm->slave_snapshot_count; i++) {
+        if (snapshot_used[i]) {
+            continue;
+        }
+
+        snapshot = fsm->slave_snapshots + i;
+        if (ec_fsm_master_slave_snapshot_identity_matches(snapshot, slave)) {
+            snapshot_used[i] = 1;
+            return snapshot;
+        }
+    }
+
+    return NULL;
+}
+
+/****************************************************************************/
+
+/** Applies previous slave snapshots after a rescan.
+ */
+void ec_fsm_master_apply_slave_snapshots(
+        ec_fsm_master_t *fsm /**< Master state machine. */
+        )
+{
+    ec_master_t *master = fsm->master;
+    ec_slave_t *slave;
+    ec_fsm_master_slave_snapshot_t *snapshot;
+    uint8_t *snapshot_used;
+    unsigned int i, fallback_decrease;
+
+    if (!fsm->slave_snapshot_count) {
+        for (i = 0; i < master->slave_count; i++) {
+            slave = master->slaves + i;
+            slave->force_config = 1;
+            EC_SLAVE_DBG(slave, 1, "Slave new after rescan;"
+                    " forcing configuration.\n");
+        }
+        ec_fsm_master_clear_slave_snapshots(fsm);
+        return;
+    }
+
+    snapshot_used = kzalloc(fsm->slave_snapshot_count, GFP_KERNEL);
+    if (!snapshot_used) {
+        EC_MASTER_WARN(master, "Failed to allocate slave rescan match map."
+                " Treating all scanned slaves as changed.\n");
+    }
+
+    for (i = 0; i < master->slave_count; i++) {
+        slave = master->slaves + i;
+        snapshot = snapshot_used ?
+            ec_fsm_master_find_slave_snapshot(fsm, slave, snapshot_used) :
+            NULL;
+        fallback_decrease = 0;
+
+        if (!snapshot && master->slave_count < fsm->slave_snapshot_count
+                && snapshot_used) {
+            ec_fsm_master_slave_snapshot_t *pos_snapshot = NULL;
+            ec_fsm_master_slave_snapshot_t *config_snapshot = NULL;
+            unsigned int j;
+
+            for (j = 0; j < fsm->slave_snapshot_count; j++) {
+                ec_fsm_master_slave_snapshot_t *candidate =
+                    fsm->slave_snapshots + j;
+
+                if (snapshot_used[j]) {
+                    continue;
+                }
+
+                if (!config_snapshot && candidate->config) {
+                    config_snapshot = candidate;
+                }
+
+                if (!pos_snapshot && j == i
+                        && candidate->device_index == slave->device_index
+                        && candidate->ring_position == slave->ring_position) {
+                    pos_snapshot = candidate;
+                }
+            }
+
+            snapshot = config_snapshot ? config_snapshot : pos_snapshot;
+
+            if (snapshot) {
+                fallback_decrease = 1;
+                snapshot_used[snapshot - fsm->slave_snapshots] = 1;
+                if (snapshot->device_index == slave->device_index
+                        && snapshot->ring_position == slave->ring_position) {
+                    EC_SLAVE_INFO(slave, "Identity mismatch after rescan at"
+                            " same ring position (previous"
+                            " %08x:%08x:%08x:%08x, current"
+                            " %08x:%08x:%08x:%08x).\n",
+                            snapshot->vendor_id, snapshot->product_code,
+                            snapshot->revision_number,
+                            snapshot->serial_number,
+                            slave->sii.vendor_id, slave->sii.product_code,
+                            slave->sii.revision_number,
+                            slave->sii.serial_number);
+                }
+                EC_SLAVE_INFO(slave, "Keeping previous configuration after"
+                        " slave count decrease despite identity mismatch"
+                        " (previous ring position %u, had_config=%u,"
+                        " previous identity %08x:%08x:%08x:%08x,"
+                        " current identity %08x:%08x:%08x:%08x).\n",
+                        snapshot->ring_position, snapshot->config ? 1 : 0,
+                        snapshot->vendor_id, snapshot->product_code,
+                        snapshot->revision_number, snapshot->serial_number,
+                        slave->sii.vendor_id, slave->sii.product_code,
+                        slave->sii.revision_number,
+                        slave->sii.serial_number);
+            }
+        }
+
+        if (snapshot) {
+            char cur_state[EC_STATE_STRING_SIZE];
+
+            ec_fsm_master_restore_slave_snapshot_state(slave, snapshot);
+            if (fallback_decrease) {
+                slave->force_config = 0;
+                slave->requested_state = slave->current_state;
+            }
+            ec_state_string(slave->current_state, cur_state, 0);
+            EC_SLAVE_INFO(slave, "Unchanged after rescan"
+                    " (previous ring position %u, AL state %s);"
+                    " keeping current configuration, force_config=%u.\n",
+                    snapshot->ring_position, cur_state, slave->force_config);
+        } else {
+            slave->force_config = 1;
+            EC_SLAVE_INFO(slave, "New or changed after rescan;"
+                    " forcing configuration.\n");
+        }
+    }
+
+    kfree(snapshot_used);
+    ec_fsm_master_clear_slave_snapshots(fsm);
+}
+
+/****************************************************************************/
+
+#endif
 
 /** Restarts the master state machine.
  */
@@ -292,12 +600,14 @@ void ec_fsm_master_state_broadcast(
 
     // bus topology change?
     if (datagram->working_counter != fsm->slaves_responding[fsm->dev_idx]) {
+        unsigned int old_count = fsm->slaves_responding[fsm->dev_idx];
+
         fsm->rescan_required = 1;
         fsm->slaves_responding[fsm->dev_idx] = datagram->working_counter;
-        EC_MASTER_INFO(master, "%u slave(s) responding on %s device. "
+        EC_MASTER_INFO(master, "Slave count changed on %s device: %u -> %u. "
                 "Re-scanning on next possibility.\n",
-                fsm->slaves_responding[fsm->dev_idx],
-                ec_device_names[fsm->dev_idx != 0]);
+                ec_device_names[fsm->dev_idx != 0], old_count,
+                fsm->slaves_responding[fsm->dev_idx]);
     }
 
     if (fsm->link_state[fsm->dev_idx] &&
@@ -311,6 +621,9 @@ void ec_fsm_master_state_broadcast(
 #ifdef EC_EOE
         ec_master_eoe_stop(master);
         ec_master_clear_eoe_handlers(master);
+#endif
+#ifdef EC_INCREMENTAL_SCAN
+        ec_fsm_master_clear_slave_snapshots(fsm);
 #endif
         ec_master_clear_slaves(master);
 
@@ -364,6 +677,9 @@ void ec_fsm_master_state_broadcast(
             fsm->rescan_required = 0;
             fsm->idle = 0;
             fsm->scan_jiffies = jiffies;
+#ifdef EC_INCREMENTAL_SCAN
+            ec_fsm_master_take_slave_snapshots(fsm);
+#endif
 
 #ifdef EC_EOE
             ec_master_eoe_stop(master);
@@ -378,6 +694,9 @@ void ec_fsm_master_state_broadcast(
 
             if (!count) {
                 // no slaves present -> finish state machine.
+#ifdef EC_INCREMENTAL_SCAN
+                ec_fsm_master_clear_slave_snapshots(fsm);
+#endif
                 master->scan_busy = 0;
                 wake_up_interruptible(&master->scan_queue);
                 ec_fsm_master_restart(fsm);
@@ -389,6 +708,9 @@ void ec_fsm_master_state_broadcast(
                         (ec_slave_t *) kmalloc(size, GFP_KERNEL))) {
                 EC_MASTER_ERR(master, "Failed to allocate %u bytes"
                         " of slave memory!\n", size);
+#ifdef EC_INCREMENTAL_SCAN
+                ec_fsm_master_clear_slave_snapshots(fsm);
+#endif
                 master->scan_busy = 0;
                 wake_up_interruptible(&master->scan_queue);
                 ec_fsm_master_restart(fsm);
@@ -408,6 +730,25 @@ void ec_fsm_master_state_broadcast(
                 }
 
                 ec_slave_init(slave, master, dev_idx, ring_position, i + 1);
+#ifdef EC_INCREMENTAL_SCAN
+                if (i < fsm->slave_snapshot_count) {
+                    ec_fsm_master_slave_snapshot_t *snapshot =
+                        fsm->slave_snapshots + i;
+                    if (snapshot->device_index == slave->device_index
+                            && snapshot->ring_position
+                            == slave->ring_position) {
+                        char cur_state[EC_STATE_STRING_SIZE];
+
+                        ec_fsm_master_restore_slave_snapshot_state(
+                                slave, snapshot);
+                        ec_state_string(slave->current_state, cur_state, 0);
+                        EC_SLAVE_INFO(slave, "Restored previous state"
+                                " before rescan scan phase"
+                                " (AL state %s, force_config=%u).\n",
+                                cur_state, slave->force_config);
+                    }
+                }
+#endif
 
                 // do not force reconfiguration in operation phase to avoid
                 // unnecesssary process data interruptions
@@ -855,6 +1196,9 @@ void ec_fsm_master_state_clear_addresses(
                 " clearing datagram on %s link: ",
                 ec_device_names[fsm->dev_idx != 0]);
         ec_datagram_print_state(datagram);
+#ifdef EC_INCREMENTAL_SCAN
+        ec_fsm_master_clear_slave_snapshots(fsm);
+#endif
         master->scan_busy = 0;
         master->scan_index = master->slave_count;
         wake_up_interruptible(&master->scan_queue);
@@ -899,6 +1243,9 @@ void ec_fsm_master_state_dc_measure_delays(
         EC_MASTER_ERR(master, "Failed to receive delay measuring datagram"
                 " on %s link: ", ec_device_names[fsm->dev_idx != 0]);
         ec_datagram_print_state(datagram);
+#ifdef EC_INCREMENTAL_SCAN
+        ec_fsm_master_clear_slave_snapshots(fsm);
+#endif
         master->scan_busy = 0;
         master->scan_index = master->slave_count;
         wake_up_interruptible(&master->scan_queue);
@@ -983,6 +1330,10 @@ void ec_fsm_master_state_scan_slave(
     EC_MASTER_INFO(master, "Bus scanning completed in %lu ms.\n",
             (jiffies - fsm->scan_jiffies) * 1000 / HZ);
 
+#ifdef EC_INCREMENTAL_SCAN
+    ec_fsm_master_apply_slave_snapshots(fsm);
+#endif
+
     master->scan_busy = 0;
     master->scan_index = master->slave_count;
     wake_up_interruptible(&master->scan_queue);
@@ -999,10 +1350,30 @@ void ec_fsm_master_state_scan_slave(
 #endif
 
     if (master->slave_count) {
+#ifdef EC_INCREMENTAL_SCAN
+        unsigned int i, configure = 0;
+
+        master->config_changed = 0;
+
+        for (i = 0; i < master->slave_count; i++) {
+            if (master->slaves[i].force_config) {
+                configure = 1;
+                break;
+            }
+        }
+
+        if (configure) {
+            fsm->slave = master->slaves; // begin with first slave
+            ec_fsm_master_enter_write_system_times(fsm);
+        } else {
+            ec_fsm_master_restart(fsm);
+        }
+#else
         master->config_changed = 0;
 
         fsm->slave = master->slaves; // begin with first slave
         ec_fsm_master_enter_write_system_times(fsm);
+#endif
     } else {
         ec_fsm_master_restart(fsm);
     }
