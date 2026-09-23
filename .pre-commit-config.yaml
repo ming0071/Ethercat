@@ -28,3 +28,6 @@ repos:
     rev: 2.0.2
     hooks:
       - id: cpplint
+        # The Ethernet drivers follow the Linux kernel coding style
+        # (see CodingStyle.md), which cpplint contradicts.
+        exclude: ^devices/
