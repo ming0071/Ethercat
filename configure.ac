@@ -1,6 +1,6 @@
 #-----------------------------------------------------------------------------
 #
-#  Copyright (C) 2006-2025  Florian Pose, Ingenieurgemeinschaft IgH
+#  Copyright (C) 2006-2026  Florian Pose, Ingenieurgemeinschaft IgH
 #
 #  This file is part of the IgH EtherCAT Master.
 #
@@ -27,8 +27,39 @@ AC_PREREQ([2.59])
 # - Write NEWS.md entry with changes since last release
 # - Check for complete Doxygen comments
 # - Update version number below
+# - Update library version info below
+# - Check symbol versions in lib/libethercat.map
 #
-AC_INIT([ethercat], [1.6.8], [fp@igh.de])
+AC_INIT([ethercat], [1.7.0], [fp@igh.de])
+
+#
+# Library version info (current:revision:age) for libethercat and
+# libfakeethercat, see
+# http://www.gnu.org/software/libtool/manual/html_node/ ...
+# Updating-version-info.html
+#
+# - If the library source code has changed at all since the last update, then
+#   increment revision (‘c:r:a’ becomes ‘c:r+1:a’).
+# - If any interfaces have been added, removed, or changed since the last
+#   update, increment current, and set revision to 0.
+# - If any interfaces have been added since the last public release, then
+#   increment age.
+# - If any interfaces have been removed or changed since the last public
+#   release, then set age to 0.
+#
+# History
+#
+# 1:0:0
+#   ecrt_master_sync_reference_clock_to() added.
+# 2:0:1
+#   SoE requests added
+# 3:0:2
+#   1.6: Scan progress, EoE IP parameters and state timeout added
+# 4:0:3
+#   1.7: ecrt_master_sii_caching() and ecrt_slave_config_pdo_mode() added
+#
+AC_SUBST([LIBETHERCAT_VERSION_INFO], [4:0:3])
+
 AC_CONFIG_AUX_DIR([autoconf])
 AM_INIT_AUTOMAKE([-Wall -Wno-override -Werror dist-bzip2 subdir-objects foreign])
 m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES([yes])])
@@ -107,9 +138,9 @@ AC_ARG_WITH([linux-dir],
 
 AC_MSG_CHECKING([for Linux kernel sources])
 
-if test \! -r ${sourcedir}/.config; then
+if test \! -r ${sourcedir}/Makefile; then
     echo
-    AC_MSG_ERROR([No configured Linux kernel sources in $sourcedir])
+    AC_MSG_ERROR([No Linux kernel sources in $sourcedir])
 fi
 
 # Try to get kernel release string
@@ -127,7 +158,7 @@ fi
 
 if test -z "$kernelrelease"; then
     echo
-    AC_MSG_ERROR([Failed to extract Linux kernel version!])
+    AC_MSG_ERROR([Failed to extract Linux kernel version! Does ${sourcedir} contain prepared kernel sources?])
 fi
 
 if test ${kernelrelease%%.*} -gt 2; then
@@ -490,6 +521,52 @@ if test "x${enablegenet}" = "x1"; then
 fi
 
 AC_SUBST(KERNEL_GENET, [$kernelgenet])
+
+#-----------------------------------------------------------------------------
+# macb driver
+#-----------------------------------------------------------------------------
+
+AC_ARG_ENABLE([macb],
+    AS_HELP_STRING([--enable-macb],
+                   [Build macb driver for Raspi 5 [default=no]]),
+    [
+        case "${enableval}" in
+            yes) enablemacb=1
+                ;;
+            no) enablemacb=0
+                ;;
+            *) AC_MSG_ERROR([Invalid value for --enable-macb])
+                ;;
+        esac
+    ],
+    [enablemacb=0]
+)
+
+AM_CONDITIONAL(ENABLE_MACB, test "x$enablemacb" = "x1")
+AC_SUBST(ENABLE_MACB, [$enablemacb])
+
+AC_ARG_WITH([macb-kernel],
+    AS_HELP_STRING([--with-macb-kernel=<X.Y.Z>],
+                   [macb kernel (only if differing)]),
+    [
+        kernelmacb=[$withval]
+    ],
+    [
+        kernelmacb=$linuxversion
+    ]
+)
+
+if test "x${enablemacb}" = "x1"; then
+    AC_MSG_CHECKING([for kernel for macb driver])
+
+    if test ! -f "${srcdir}/devices/macb/macb_main-${kernelmacb}-orig.c"; then
+        AC_MSG_ERROR([kernel $kernelmacb not available for macb driver!])
+    fi
+
+    AC_MSG_RESULT([$kernelmacb])
+fi
+
+AC_SUBST(KERNEL_MACB, [$kernelmacb])
 
 #-----------------------------------------------------------------------------
 # igb driver
@@ -1210,6 +1287,37 @@ fi
 AM_CONDITIONAL(ENABLE_FAKEUSERLIB, test "x$fakeuserlib" = "x1")
 
 #-----------------------------------------------------------------------------
+# example programs
+#-----------------------------------------------------------------------------
+
+AC_MSG_CHECKING([whether to build the examples])
+
+AC_ARG_ENABLE([examples],
+    AS_HELP_STRING([--enable-examples],
+                   [Generation of example modules (default: yes)]),
+    [
+        case "${enableval}" in
+            yes) examples=1
+                ;;
+            no) examples=0
+                ;;
+            *) AC_MSG_ERROR([Invalid value for --enable-examples])
+                ;;
+        esac
+    ],
+    [examples=1]
+)
+
+if test "x${examples}" = "x1"; then
+    AC_MSG_RESULT([yes])
+else
+    AC_MSG_RESULT([no])
+fi
+
+AM_CONDITIONAL(ENABLE_EXAMPLES, test "x$examples" = "x1")
+AC_SUBST(ENABLE_EXAMPLES,[$examples])
+
+#-----------------------------------------------------------------------------
 # TTY driver
 #-----------------------------------------------------------------------------
 
@@ -1443,6 +1551,8 @@ AC_CONFIG_FILES([
         devices/igb/Makefile
         devices/igc/Kbuild
         devices/igc/Makefile
+        devices/macb/Kbuild
+        devices/macb/Makefile
         devices/r8169/Kbuild
         devices/r8169/Makefile
         devices/stmmac/Kbuild

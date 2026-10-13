@@ -38,7 +38,7 @@ libfakeethercat_la_CXXFLAGS = \
 	-fvisibility=hidden \
 	$(RTIPC_CFLAGS)
 
-libfakeethercat_la_LDFLAGS = -version-info 3:0:2 \
+libfakeethercat_la_LDFLAGS = -version-info $(LIBETHERCAT_VERSION_INFO) \
 	$(RTIPC_LIBS) \
 	-Wl,--version-script=$(srcdir)/../lib/libethercat.map \
 	-fvisibility=hidden

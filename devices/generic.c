@@ -42,7 +42,8 @@
 
 #define EC_GEN_RX_QUEUE_MAX 128
 
-#if defined(CONFIG_SUSE_KERNEL) && LINUX_VERSION_CODE >= KERNEL_VERSION(5, 14, 0)
+#if defined(CONFIG_SUSE_KERNEL) \
+    && LINUX_VERSION_CODE >= KERNEL_VERSION(5, 14, 0)
 #include <linux/suse_version.h>
 #else
 #  ifndef SUSE_VERSION
@@ -51,6 +52,11 @@
 #  ifndef SUSE_PATCHLEVEL
 #    define SUSE_PATCHLEVEL 0
 #  endif
+#endif
+
+// Support old kernels by providing a fallback for `strscpy`
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 3, 0)
+#define strscpy strncpy
 #endif
 
 /****************************************************************************/
@@ -307,7 +313,8 @@ int ec_gen_device_offer(
     dev->used_netdev = desc->netdev;
     dev_hold(dev->used_netdev);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) || (SUSE_VERSION == 15 && SUSE_PATCHLEVEL >= 5)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) \
+    || (SUSE_VERSION == 15 && SUSE_PATCHLEVEL >= 5)
     eth_hw_addr_set(dev->netdev, desc->dev_addr);
 #else
     memcpy(dev->netdev->dev_addr, desc->dev_addr, ETH_ALEN);
@@ -490,8 +497,8 @@ int __init ec_gen_init_module(void)
     struct net_device *netdev;
     ec_gen_interface_desc_t *desc, *next;
 
-    printk(KERN_INFO PFX "EtherCAT master generic Ethernet device module %s\n",
-            EC_MASTER_VERSION);
+    printk(KERN_INFO PFX "EtherCAT master generic Ethernet device"
+            " module %s\n", EC_MASTER_VERSION);
 
     INIT_LIST_HEAD(&generic_devices);
     INIT_LIST_HEAD(&descs);
@@ -512,7 +519,7 @@ int __init ec_gen_init_module(void)
             rcu_read_unlock();
             goto out_err;
         }
-        strncpy(desc->name, netdev->name, IFNAMSIZ);
+        strscpy(desc->name, netdev->name, IFNAMSIZ);
         desc->netdev = netdev;
         desc->ifindex = netdev->ifindex;
         memcpy(desc->dev_addr, netdev->dev_addr, ETH_ALEN);

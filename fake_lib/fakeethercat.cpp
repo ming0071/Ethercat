@@ -199,7 +199,7 @@ ec_slave_config_t *ec_master::slave_config(
         }
     }
     else {
-        return &slaves.insert(std::make_pair<ec_address, ec_slave_config>(
+        return &slaves.insert(std::make_pair(
                                       ec_address {address},
                                       ec_slave_config {
                                               address,
@@ -552,6 +552,14 @@ int ecrt_master_reset(ec_master_t *master /**< EtherCAT master. */
     return 0;
 }
 
+int ecrt_master_sii_caching(
+        ec_master_t *master,          /**< EtherCAT master. */
+        ec_sii_caching_fields_t fields /**< Fields to use for cache lookup. */
+)
+{
+    return 0;
+}
+
 static int mkpath(const std::string &file_path)
 {
     if (file_path.empty()) {
@@ -634,6 +642,15 @@ int ecrt_slave_config_watchdog(
                                       manager watchdog (register 0x0420). If
                                       set to zero, the value is not written,
                                       so the default is used. */
+)
+{
+    return 0;
+}
+
+int ecrt_slave_config_pdo_mode(
+        ec_slave_config_t *sc,     /**< Slave configuration. */
+        ec_pdo_mode_t assign_mode, /**< Mode for the PDO assignment. */
+        ec_pdo_mode_t config_mode  /**< Mode for the PDO configuration. */
 )
 {
     return 0;
@@ -1227,19 +1244,25 @@ ssize_t ec_domain::map(
             return pdo.offset;
         }
     }
-    const auto ans = data.size();
-    const auto size = config.sync_managers.at(syncManager)
-                              .pdos.at(pdo_index)
-                              .sizeInBytes();
-    mapped_pdos.emplace_back(
-            ans,
-            size,
-            config.address,
-            syncManager,
-            pdo_index,
-            config.sync_managers.at(syncManager).dir);
-    data.resize(ans + size);
-    return ans;
+
+    // The real EtherCAT master maps the complete contents of a sync
+    // manager as one contiguous block, so applications may rely on
+    // pointer arithmetic to get from one PDO to the next PDO of the same
+    // sync manager. Mirror that here by mapping all PDOs of the sync
+    // manager at once, instead of only the requested one.
+    const auto &sm = config.sync_managers.at(syncManager);
+    ssize_t requested_offset = -1;
+    for (const auto &pdo_kv : sm.pdos) {
+        const auto ans = data.size();
+        const auto size = pdo_kv.second.sizeInBytes();
+        mapped_pdos.emplace_back(
+                ans, size, config.address, syncManager, pdo_kv.first, sm.dir);
+        data.resize(ans + size);
+        if (pdo_kv.first == pdo_index) {
+            requested_offset = ans;
+        }
+    }
+    return requested_offset;
 }
 
 /*****************************************************************************

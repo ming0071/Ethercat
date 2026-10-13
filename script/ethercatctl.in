@@ -55,6 +55,15 @@ fi
 
 #------------------------------------------------------------------------------
 
+std_module_name() {
+    case "${1}" in
+        ccat) echo "ec_bhf" ;; # standard driver has a different name
+        *) echo "${1}" ;;
+    esac
+}
+
+#------------------------------------------------------------------------------
+
 is_mac_address() {
     local x='[0-9a-fA-F]'
     echo "$1" | grep -qE "^($x$x:){5}$x$x\$" -
@@ -121,9 +130,17 @@ start)
         exit 1
     fi
 
+    MODULE_PARAMS=(
+        main_devices="${DEVICES}"
+        backup_devices="${BACKUPS}"
+    )
+
+    if [ -n "$SII_CACHING" ]; then
+        MODULE_PARAMS+=(sii_caching="$SII_CACHING")
+    fi
+
     # load master module
-    if ! ${MODPROBE} ${MODPROBE_FLAGS} ec_master \
-            main_devices="${DEVICES}" backup_devices="${BACKUPS}"; then
+    if ! ${MODPROBE} ${MODPROBE_FLAGS} ec_master "${MODULE_PARAMS[@]}"; then
         exit 1
     fi
 
@@ -136,10 +153,11 @@ start)
             continue # ec_* module not found
         fi
 
-        if [ "${MODULE}" != "generic" ] && [ "${MODULE}" != "ccat" ]; then
+        if [ "${MODULE}" != "generic" ]; then
+            STDMODULE=$(std_module_name "${MODULE}")
             # unload standard module and check if unloading was successful
-            ${RMMOD} "${MODULE}" 2> /dev/null || true
-            if ${LSMOD} | grep "^${MODULE} " > /dev/null; then
+            ${RMMOD} "${STDMODULE}" 2> /dev/null || true
+            if ${LSMOD} | grep "^${STDMODULE//-/_} " > /dev/null; then
                 # could not unload module
                 ${RMMOD} ${LOADED_MODULES}
                 exit 1
@@ -147,8 +165,8 @@ start)
         fi
 
         if ! ${MODPROBE} ${MODPROBE_FLAGS} "${ECMODULE}"; then
-            if [ "${MODULE}" != "generic" ] && [ "${MODULE}" != "ccat" ]; then
-                ${MODPROBE} ${MODPROBE_FLAGS} "${MODULE}" # try to restore
+            if [ "${MODULE}" != "generic" ]; then
+                ${MODPROBE} ${MODPROBE_FLAGS} "${STDMODULE}" # try to restore
             fi
             ${RMMOD} ${LOADED_MODULES}
             exit 1
@@ -166,7 +184,7 @@ stop)
     # unload EtherCAT device modules
     for MODULE in ${DEVICE_MODULES} master; do
         ECMODULE=ec_${MODULE}
-        if ! ${LSMOD} | grep -q "^${ECMODULE} "; then
+        if ! ${LSMOD} | grep -q "^${ECMODULE//-/_} "; then
             continue # ec_* module not loaded
         fi
         if ! ${RMMOD} "${ECMODULE}"; then
@@ -178,10 +196,10 @@ stop)
 
     # load standard modules again
     for MODULE in ${DEVICE_MODULES}; do
-        if [ "${MODULE}" == "generic" ] || [ "${MODULE}" == "ccat" ]; then
+        if [ "${MODULE}" == "generic" ]; then
             continue
         fi
-        ${MODPROBE} ${MODPROBE_FLAGS} "${MODULE}"
+        ${MODPROBE} ${MODPROBE_FLAGS} "$(std_module_name "${MODULE}")"
     done
 
     # bring down all updown interfaces

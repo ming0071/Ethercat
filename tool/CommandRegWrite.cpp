@@ -1,6 +1,6 @@
 /*****************************************************************************
  *
- *  Copyright (C) 2006-2012  Florian Pose, Ingenieurgemeinschaft IgH
+ *  Copyright (C) 2006-2026  Florian Pose, Ingenieurgemeinschaft IgH
  *
  *  This file is part of the IgH EtherCAT Master.
  *
@@ -19,14 +19,24 @@
  *
  ****************************************************************************/
 
+#include "CommandRegWrite.h"
+
+#include "sii_crc.h"
+#include "MasterDevice.h"
+
 #include <iostream>
 #include <iomanip>
 #include <fstream>
-using namespace std;
 
-#include "CommandRegWrite.h"
-#include "sii_crc.h"
-#include "MasterDevice.h"
+using std::string;
+using std::stringstream;
+using std::ostringstream;
+using std::endl;
+using std::ios;
+using std::ifstream;
+using std::istream;
+using std::cin;
+using std::cerr;
 
 /****************************************************************************/
 
@@ -121,11 +131,11 @@ void CommandRegWrite::execute(const StringVector &args)
             io.size = 1024; // FIXME
         }
 
-        io.data = new uint8_t[io.size];
+        io.data = new uint8_t[io.size + 1];
 
         try {
             io.size = interpretAsType(
-                    dataType, args[1], io.data, io.size);
+                    dataType, args[1], io.data, io.size + 1);
         } catch (SizeException &e) {
             delete [] io.data;
             throwCommandException(e.what());

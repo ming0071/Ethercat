@@ -89,6 +89,9 @@ void ec_slave_config_init(
     sc->watchdog_divider = 0; // use default
     sc->watchdog_intervals = 0; // use default
 
+    sc->pdo_assign_mode = EC_PDO_MODE_DEFAULT;
+    sc->pdo_config_mode = EC_PDO_MODE_DEFAULT;
+
     sc->slave = NULL;
 
     for (i = 0; i < EC_MAX_SYNC_MANAGERS; i++)
@@ -206,7 +209,7 @@ void ec_slave_config_clear(
  * Configuration data for the FMMU is saved in the slave config structure and
  * is written to the slave during the configuration. The FMMU configuration
  * is done in a way, that the complete data range of the corresponding sync
- * manager is covered. Seperate FMMUs are configured for each domain. If the
+ * manager is covered. Separate FMMUs are configured for each domain. If the
  * FMMU configuration is already prepared, the function does nothing and
  * returns with success.
  *
@@ -716,6 +719,30 @@ int ecrt_slave_config_watchdog(ec_slave_config_t *sc,
 
 /****************************************************************************/
 
+int ecrt_slave_config_pdo_mode(ec_slave_config_t *sc,
+        ec_pdo_mode_t assign_mode, ec_pdo_mode_t config_mode)
+{
+    EC_CONFIG_DBG(sc, 1, "%s(sc = 0x%p, assign_mode = %u,"
+            " config_mode = %u)\n", __func__, sc, assign_mode, config_mode);
+
+    if (assign_mode > EC_PDO_MODE_WRITE_IF_DIFFERENT) {
+        EC_CONFIG_ERR(sc, "Invalid PDO assignment mode %u!\n", assign_mode);
+        return -EINVAL;
+    }
+
+    if (config_mode > EC_PDO_MODE_WRITE_IF_DIFFERENT) {
+        EC_CONFIG_ERR(sc, "Invalid PDO configuration mode %u!\n",
+                config_mode);
+        return -EINVAL;
+    }
+
+    sc->pdo_assign_mode = assign_mode;
+    sc->pdo_config_mode = config_mode;
+    return 0;
+}
+
+/****************************************************************************/
+
 int ecrt_slave_config_pdo_assign_add(ec_slave_config_t *sc,
         uint8_t sync_index, uint16_t pdo_index)
 {
@@ -863,7 +890,6 @@ int ecrt_slave_config_pdos(ec_slave_config_t *sc,
         ecrt_slave_config_pdo_assign_clear(sc, sync_info->index);
 
         if (sync_info->n_pdos && sync_info->pdos) {
-
             for (j = 0; j < sync_info->n_pdos; j++) {
                 pdo_info = &sync_info->pdos[j];
 
@@ -1542,7 +1568,7 @@ int ecrt_slave_config_eoe_dns_address(ec_slave_config_t *sc,
 int ecrt_slave_config_eoe_hostname(ec_slave_config_t *sc,
         const char *name)
 {
-    strncpy(sc->eoe_ip_param_request.name, name, EC_MAX_HOSTNAME_SIZE - 1);
+    strscpy(sc->eoe_ip_param_request.name, name, EC_MAX_HOSTNAME_SIZE - 1);
     sc->eoe_ip_param_request.name_included = 1;
     return 0;
 }
@@ -1613,6 +1639,7 @@ int ecrt_slave_config_state_timeout(ec_slave_config_t *sc,
 
 EXPORT_SYMBOL(ecrt_slave_config_sync_manager);
 EXPORT_SYMBOL(ecrt_slave_config_watchdog);
+EXPORT_SYMBOL(ecrt_slave_config_pdo_mode);
 EXPORT_SYMBOL(ecrt_slave_config_pdo_assign_add);
 EXPORT_SYMBOL(ecrt_slave_config_pdo_assign_clear);
 EXPORT_SYMBOL(ecrt_slave_config_pdo_mapping_add);

@@ -1,6 +1,6 @@
 /*****************************************************************************
  *
- *  Copyright (C) 2006-2022  Florian Pose, Ingenieurgemeinschaft IgH
+ *  Copyright (C) 2006-2026  Florian Pose, Ingenieurgemeinschaft IgH
  *
  *  This file is part of the IgH EtherCAT Master.
  *
@@ -21,17 +21,30 @@
 
 #define DEBUG 0
 
-#if DEBUG
-#include <iostream>
-#endif
-
-#include <iomanip>
-#include <sstream>
-using namespace std;
-
 #include "DataTypeHandler.h"
 
 #include "ecrt.h"
+
+#if DEBUG
+#include <iostream>
+#endif
+#include <iomanip>
+#include <sstream>
+
+using std::string;
+using std::stringstream;
+using std::ostream;
+using std::endl;
+using std::flush;
+using std::ios;
+using std::runtime_error;
+using std::hex;
+using std::dec;
+using std::setw;
+using std::setfill;
+#if DEBUG
+using std::cerr;
+#endif
 
 /****************************************************************************/
 
@@ -178,13 +191,14 @@ size_t DataTypeHandler::interpretAsType(
         case 0x000a: // octet_string
         case 0x000b: // unicode_string
             dataSize = str.str().size();
-            if (dataSize > targetSize) {
+            if (dataSize + 1 > targetSize) { // leave room for terminating \0
                 stringstream err;
                 err << "String too large ("
-                    << dataSize << " > " << targetSize << ")";
+                    << dataSize << " > " << targetSize - 1 << ")";
                 throw SizeException(err.str());
             }
-            str >> (char *) target;
+            str.read((char *) target, dataSize);
+            ((char *) target)[dataSize] = 0; // terminating \0
             break;
         case 0x0011: // double
             {
