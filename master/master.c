@@ -2171,6 +2171,30 @@ void ec_master_find_dc_ref_clock(
     if (ref) {
         EC_MASTER_INFO(master, "Using slave %u as DC reference clock.\n",
                 ref->ring_position);
+
+        // The cyclic time distribution datagram only writes to slaves behind
+        // the reference in frame order; DC slaves in front of it free-run.
+        {
+            unsigned int upstream_dc = 0;
+
+            for (slave = master->slaves; slave < ref; slave++) {
+                if (slave->base_dc_supported && slave->has_dc_system_time) {
+                    upstream_dc++;
+                    if (slave->config && slave->config->dc_assign_activate) {
+                        EC_SLAVE_WARN(slave, "Slave has DC sync configured,"
+                                " but is in front of the reference clock and"
+                                " will not receive cyclic time"
+                                " distribution!\n");
+                    }
+                }
+            }
+
+            if (upstream_dc) {
+                EC_MASTER_WARN(master, "%u DC-capable slave(s) in front of"
+                        " the reference clock will not receive cyclic time"
+                        " distribution.\n", upstream_dc);
+            }
+        }
     }
     else {
         EC_MASTER_INFO(master, "No DC reference clock found.\n");
@@ -2260,11 +2284,16 @@ void ec_master_calc_transmission_delays(
             slave < master->slaves + master->slave_count;
             slave++) {
         ec_slave_calc_port_delays(slave);
+        // Reset before the re-rootable walk below: with a non-default
+        // reference some slaves would otherwise keep stale delays from a
+        // previous reference if they are not revisited.
+        slave->transmission_delay = 0U;
     }
 
     if (master->dc_ref_clock) {
         uint32_t delay = 0;
-        ec_slave_calc_transmission_delays_rec(master->dc_ref_clock, &delay);
+        ec_slave_calc_transmission_delays_rec(master->dc_ref_clock, NULL,
+                &delay);
     }
 }
 
@@ -2467,8 +2496,7 @@ ec_domain_t *ecrt_master_create_domain_err(
     ec_domain_t *domain, *last_domain;
     unsigned int index;
 
-    EC_MASTER_DBG(master, 1, "ecrt_master_create_domain(master = 0x%p)\n",
-            master);
+    EC_MASTER_DBG(master, 1, "%s(master = 0x%p)\n", __func__, master);
 
     if (!(domain =
                 (ec_domain_t *) kmalloc(sizeof(ec_domain_t), GFP_KERNEL))) {
@@ -2516,7 +2544,7 @@ int ecrt_master_activate(ec_master_t *master)
     int eoe_was_running;
 #endif
 
-    EC_MASTER_DBG(master, 1, "ecrt_master_activate(master = 0x%p)\n", master);
+    EC_MASTER_DBG(master, 1, "%s(master = 0x%p)\n", __func__, master);
 
     if (master->active) {
         EC_MASTER_WARN(master, "%s: Master already active!\n", __func__);
@@ -2780,7 +2808,6 @@ ec_slave_config_t *ecrt_master_slave_config_err(ec_master_t *master,
     ec_slave_config_t *sc;
     unsigned int found = 0;
 
-
     EC_MASTER_DBG(master, 1, "ecrt_master_slave_config(master = 0x%p,"
             " alias = %u, position = %u, vendor_id = 0x%08x,"
             " product_code = 0x%08x)\n",
@@ -2845,18 +2872,22 @@ ec_slave_config_t *ecrt_master_slave_config(ec_master_t *master,
 int ecrt_master_select_reference_clock(ec_master_t *master,
         ec_slave_config_t *sc)
 {
-    if (sc) {
-        ec_slave_t *slave = sc->slave;
+    EC_MASTER_DBG(master, 1, "%s(master = 0x%p, sc = 0x%p)\n",
+            __func__, master, sc);
 
-        // output an early warning
-        if (slave &&
-                (!slave->base_dc_supported || !slave->has_dc_system_time)) {
-            EC_MASTER_WARN(master, "Slave %u can not act as"
-                    " a reference clock!", slave->ring_position);
-        }
+    if (down_interruptible(&master->master_sem)) {
+        return -EINTR;
     }
 
     master->dc_ref_config = sc;
+    // Re-run the full DC calculation, not just ec_master_find_dc_ref_clock():
+    // the reference pointer alone is not enough. calc_topology() and
+    // calc_transmission_delays() must recompute every slave's propagation
+    // delay relative to the newly selected reference, otherwise the cyclic
+    // write-system-times FSM keeps writing delays anchored on the old
+    // default reference and the selection has no effect on DC compensation.
+    ec_master_calc_dc(master);
+    up(&master->master_sem);
     return 0;
 }
 
@@ -2864,8 +2895,8 @@ int ecrt_master_select_reference_clock(ec_master_t *master,
 
 int ecrt_master(ec_master_t *master, ec_master_info_t *master_info)
 {
-    EC_MASTER_DBG(master, 1, "ecrt_master(master = 0x%p,"
-            " master_info = 0x%p)\n", master, master_info);
+    EC_MASTER_DBG(master, 1, "%s(master = 0x%p,"
+            " master_info = 0x%p)\n", __func__, master, master_info);
 
     master_info->slave_count = master->slave_count;
     master_info->link_up = master->devices[EC_DEVICE_MAIN].link_state;
@@ -2879,8 +2910,8 @@ int ecrt_master(ec_master_t *master, ec_master_info_t *master_info)
 int ecrt_master_scan_progress(ec_master_t *master,
         ec_master_scan_progress_t *progress)
 {
-    EC_MASTER_DBG(master, 1, "ecrt_master_scan_progress(master = 0x%p,"
-            " progress = 0x%p)\n", master, progress);
+    EC_MASTER_DBG(master, 1, "%s(master = 0x%p, progress = 0x%p)\n",
+            __func__, master, progress);
 
     progress->slave_count = master->slave_count;
     progress->scan_index = master->scan_index;
@@ -2954,9 +2985,9 @@ out_get_slave:
 void ecrt_master_callbacks(ec_master_t *master,
         void (*send_cb)(void *), void (*receive_cb)(void *), void *cb_data)
 {
-    EC_MASTER_DBG(master, 1, "ecrt_master_callbacks(master = 0x%p,"
+    EC_MASTER_DBG(master, 1, "%s(master = 0x%p,"
             " send_cb = 0x%p, receive_cb = 0x%p, cb_data = 0x%p)\n",
-            master, send_cb, receive_cb, cb_data);
+            __func__, master, send_cb, receive_cb, cb_data);
 
     master->app_send_cb = send_cb;
     master->app_receive_cb = receive_cb;

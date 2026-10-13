@@ -257,7 +257,8 @@ const ec_pdo_t *ec_slave_find_pdo(const ec_slave_t *, uint16_t);
 void ec_slave_attach_pdo_names(ec_slave_t *);
 
 void ec_slave_calc_port_delays(ec_slave_t *);
-void ec_slave_calc_transmission_delays_rec(ec_slave_t *, uint32_t *);
+void ec_slave_calc_transmission_delays_rec(ec_slave_t *, ec_slave_t *,
+        uint32_t *);
 
 /****************************************************************************/
 
