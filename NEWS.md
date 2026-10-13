@@ -25,6 +25,8 @@
 - Backported CCAT fixes from Beckhoff
 - Added macb (Cadence GEM / RP1) driver for kernel 6.18
 - Improved macb driver performance
+- Do not print routine errors (no reference clock or no reference clock time
+  yet) in `ecrt_master_reference_clock_time()` (#231)
 
 ## Version 1.6.9
 
