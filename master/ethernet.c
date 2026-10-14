@@ -69,14 +69,6 @@
  */
 #define EC_EOE_TRIES 100
 
-/** Maximum number of frames received in a row, before a frame is
- * transmitted.
- *
- * Received frames are preferred, because the slave would drop them, if they
- * are not fetched in time. The limit avoids starving the transmission.
- */
-#define EC_EOE_MAX_RX_IN_ROW 4
-
 /****************************************************************************/
 
 // prototypes for private methods
@@ -150,7 +142,6 @@ int ec_eoe_init(
     eoe->tx_rate = 0;
     eoe->rate_jiffies = 0;
     eoe->rx_idle = 1;
-    eoe->rx_frames_in_row = 0;
     eoe->tx_idle = 1;
 
     /* device name eoe<MASTER>[as]<SLAVE>, because networking scripts don't
@@ -655,13 +646,7 @@ void ec_eoe_state_rx_fetch(ec_eoe_t *eoe /**< EoE handler */)
         }
         eoe->rx_skb = NULL;
 
-        // fetch further frames from the slave first, but do not starve the
-        // transmission
-        if (++eoe->rx_frames_in_row < EC_EOE_MAX_RX_IN_ROW) {
-            eoe->state = ec_eoe_state_rx_start;
-        } else {
-            eoe->state = ec_eoe_state_tx_start;
-        }
+        eoe->state = ec_eoe_state_tx_start;
     }
     else {
         eoe->rx_expected_fragment++;
@@ -687,8 +672,6 @@ void ec_eoe_state_tx_start(ec_eoe_t *eoe /**< EoE handler */)
 #if EOE_DEBUG_LEVEL >= 2
     unsigned int wakeup = 0;
 #endif
-
-    eoe->rx_frames_in_row = 0;
 
     if (eoe->slave->error_flag ||
             !eoe->slave->master->devices[EC_DEVICE_MAIN].link_state) {
