@@ -92,6 +92,8 @@ struct ec_eoe
     uint32_t rx_counter; /**< octets received during last second */
     uint32_t rx_rate; /**< receive rate (bps) */
     unsigned int rx_idle; /**< Idle flag. */
+    unsigned int rx_frames_in_row; /**< Frames received without
+                                     transmitting in between. */
 
     struct list_head tx_queue; /**< queue for frames to send */
     unsigned int tx_queue_size; /**< Transmit queue size. */
