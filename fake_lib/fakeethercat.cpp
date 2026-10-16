@@ -665,7 +665,7 @@ int ecrt_slave_config_pdo_assign_add(
 )
 {
     auto &syncManager = sc->sync_managers[sync_index];
-    syncManager.pdos[index];
+    syncManager.addPdo(index);
     return 0;
 }
 
@@ -676,7 +676,7 @@ int ecrt_slave_config_pdo_assign_clear(
 )
 {
     auto &syncManager = sc->sync_managers[sync_index];
-    syncManager.pdos.clear();
+    syncManager.clearPdos();
     return 0;
 }
 
@@ -750,13 +750,14 @@ int ecrt_slave_config_pdos(
         }
         auto &syncManager = sc->sync_managers[syncs[sync_idx].index];
         syncManager.dir = syncs[sync_idx].dir;
+        syncManager.clearPdos();
         for (unsigned int i = 0; i < syncs[sync_idx].n_pdos; ++i) {
             const auto &in_pdo = syncs[sync_idx].pdos[i];
             if (in_pdo.n_entries == 0 || !in_pdo.entries) {
                 std::cerr << "Default mapping not supported.";
                 return -1;
             }
-            auto &out_pdo = syncManager.pdos[in_pdo.index];
+            auto &out_pdo = syncManager.addPdo(in_pdo.index);
             for (unsigned int pdo_entry_idx = 0;
                  pdo_entry_idx < in_pdo.n_entries;
                  ++pdo_entry_idx) {
@@ -777,21 +778,22 @@ int ecrt_slave_config_reg_pdo_entry(
                                  is desired */
 )
 {
-    for (auto sync_it : sc->sync_managers) {
-        for (auto pdo_it : sync_it.second.pdos) {
+    for (const auto &sync_it : sc->sync_managers) {
+        for (auto pdo_index : sync_it.second.pdo_order) {
+            const auto &pdo = sync_it.second.pdos.at(pdo_index);
             const auto offset =
-                    pdo_it.second.findEntry(entry_index, entry_subindex);
+                    pdo.findEntry(entry_index, entry_subindex);
             if (offset != NotFound) {
+                if (!bit_position && offset.bits) {
+                    std::cerr << "Pdo Entry is not byte aligned"
+                              << " but bit offset is ignored!\n";
+                    return -1;
+                }
                 const auto domain_offset =
-                        domain->map(*sc, sync_it.first, pdo_it.first);
+                        domain->map(*sc, sync_it.first, pdo_index);
                 if (domain_offset != -1) {
                     if (bit_position) {
                         *bit_position = offset.bits;
-                    }
-                    else if (offset.bits) {
-                        std::cerr << "Pdo Entry is not byte aligned"
-                                  << " but bit offset is ignored!\n";
-                        return -1;
                     }
                     return domain_offset + offset.bytes;
                 }
@@ -819,28 +821,30 @@ int ecrt_slave_config_reg_pdo_entry_pos(
         return -1;
     }
 
-    auto pdo_it = syncIt->second.pdos.find(pdo_pos);
-    if (pdo_it == syncIt->second.pdos.end()) {
+    if (pdo_pos >= syncIt->second.pdo_order.size()) {
         return -1;
     }
 
-    const auto offset = pdo_it->second.findEntryByPos(entry_pos);
-    if (offset != NotFound) {
+    const auto pdo_index = syncIt->second.pdo_order[pdo_pos];
+    const auto &pdo = syncIt->second.pdos.at(pdo_index);
+    const auto offset = pdo.findEntryByPos(entry_pos);
+    if (offset == NotFound) {
         return -1;
     }
 
-    const auto domain_offset = domain->map(*sc, sync_index, pdo_it->first);
+    if (!bit_position && offset.bits) {
+        std::cerr << "Pdo Entry is not byte aligned"
+                  << " but bit offset is ignored!\n";
+        return -1;
+    }
+
+    const auto domain_offset = domain->map(*sc, sync_index, pdo_index);
     if (domain_offset == -1) {
         return -1;
     }
 
     if (bit_position) {
         *bit_position = offset.bits;
-    }
-    else if (offset.bits) {
-        std::cerr << "Pdo Entry is not byte aligned"
-                  << " but bit offset is ignored!\n";
-        return -1;
     }
     return domain_offset + offset.bytes;
 }
@@ -1253,13 +1257,13 @@ ssize_t ec_domain::map(
     // manager at once, instead of only the requested one.
     const auto &sm = config.sync_managers.at(syncManager);
     ssize_t requested_offset = -1;
-    for (const auto &pdo_kv : sm.pdos) {
+    for (auto index : sm.pdo_order) {
         const auto ans = data.size();
-        const auto size = pdo_kv.second.sizeInBytes();
+        const auto size = sm.pdos.at(index).sizeInBytes();
         mapped_pdos.emplace_back(
-                ans, size, config.address, syncManager, pdo_kv.first, sm.dir);
+                ans, size, config.address, syncManager, index, sm.dir);
         data.resize(ans + size);
-        if (pdo_kv.first == pdo_index) {
+        if (index == pdo_index) {
             requested_offset = ans;
         }
     }

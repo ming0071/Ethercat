@@ -47,6 +47,11 @@ struct Offset
         {
             return bytes != other.bytes || bits != other.bits;
         }
+
+        constexpr bool operator==(const Offset &other) const noexcept
+        {
+            return !(*this != other);
+        }
 };
 
 constexpr Offset NotFound(-1, -1);
@@ -65,6 +70,22 @@ struct syncManager
 {
         ec_direction_t dir;
         std::map<uint16_t /* index */, pdo> pdos;
+        std::vector<uint16_t> pdo_order;
+
+        pdo &addPdo(uint16_t index)
+        {
+            auto result = pdos.emplace(index, pdo());
+            if (result.second) {
+                pdo_order.push_back(index);
+            }
+            return result.first->second;
+        }
+
+        void clearPdos()
+        {
+            pdos.clear();
+            pdo_order.clear();
+        }
 };
 
 class ec_address
