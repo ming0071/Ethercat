@@ -31,6 +31,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 struct Offset
@@ -69,22 +70,30 @@ struct pdo
 struct syncManager
 {
         ec_direction_t dir;
-        std::map<uint16_t /* index */, pdo> pdos;
-        std::vector<uint16_t> pdo_order;
+        std::vector<std::pair<uint16_t /* index */, pdo>> pdos;
+
+        pdo *findPdo(uint16_t index)
+        {
+            for (auto &assigned_pdo : pdos) {
+                if (assigned_pdo.first == index) {
+                    return &assigned_pdo.second;
+                }
+            }
+            return nullptr;
+        }
 
         pdo &addPdo(uint16_t index)
         {
-            auto result = pdos.emplace(index, pdo());
-            if (result.second) {
-                pdo_order.push_back(index);
+            if (auto existing = findPdo(index)) {
+                return *existing;
             }
-            return result.first->second;
+            pdos.emplace_back(index, pdo());
+            return pdos.back().second;
         }
 
         void clearPdos()
         {
             pdos.clear();
-            pdo_order.clear();
         }
 };
 

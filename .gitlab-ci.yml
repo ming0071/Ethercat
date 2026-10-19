@@ -115,6 +115,7 @@ build:
         - ./bootstrap
         - ./configure --with-linux-dir=/usr/src/linux-obj/$(uname -i)/default --enable-tty --with-devices=2 --enable-ccat --enable-fakeuserlib
         - make -j8 all modules
+        - make -C fake_lib check
         - make -C lib symbol-version-check
         - make DISTCHECK_CONFIGURE_FLAGS="--with-linux-dir=/usr/src/linux-obj/$(uname -i)/default" distcheck
         - make dist

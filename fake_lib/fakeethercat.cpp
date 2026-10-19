@@ -693,8 +693,8 @@ int ecrt_slave_config_pdo_mapping_add(
     for (auto smIt = sc->sync_managers.begin();
          smIt != sc->sync_managers.end();
          ++smIt) {
-        auto pdo_it = smIt->second.pdos.find(pdo_index);
-        if (pdo_it == smIt->second.pdos.end()) {
+        auto mapped_pdo = smIt->second.findPdo(pdo_index);
+        if (!mapped_pdo) {
             continue;
         }
 
@@ -702,7 +702,7 @@ int ecrt_slave_config_pdo_mapping_add(
         entry_info.index = entry_index;
         entry_info.subindex = entry_subindex;
         entry_info.bit_length = entry_bit_length;
-        pdo_it->second.entries.push_back(entry_info);
+        mapped_pdo->entries.push_back(entry_info);
         return 0;
     }
 
@@ -719,12 +719,12 @@ int ecrt_slave_config_pdo_mapping_clear(
     for (auto smIt = sc->sync_managers.begin();
          smIt != sc->sync_managers.end();
          ++smIt) {
-        auto pdo_it = smIt->second.pdos.find(pdo_index);
-        if (pdo_it == smIt->second.pdos.end()) {
+        auto mapped_pdo = smIt->second.findPdo(pdo_index);
+        if (!mapped_pdo) {
             continue;
         }
 
-        pdo_it->second.entries.clear();
+        mapped_pdo->entries.clear();
         return 0;
     }
 
@@ -779,8 +779,9 @@ int ecrt_slave_config_reg_pdo_entry(
 )
 {
     for (const auto &sync_it : sc->sync_managers) {
-        for (auto pdo_index : sync_it.second.pdo_order) {
-            const auto &pdo = sync_it.second.pdos.at(pdo_index);
+        for (const auto &assigned_pdo : sync_it.second.pdos) {
+            const auto pdo_index = assigned_pdo.first;
+            const auto &pdo = assigned_pdo.second;
             const auto offset =
                     pdo.findEntry(entry_index, entry_subindex);
             if (offset != NotFound) {
@@ -821,12 +822,13 @@ int ecrt_slave_config_reg_pdo_entry_pos(
         return -1;
     }
 
-    if (pdo_pos >= syncIt->second.pdo_order.size()) {
+    if (pdo_pos >= syncIt->second.pdos.size()) {
         return -1;
     }
 
-    const auto pdo_index = syncIt->second.pdo_order[pdo_pos];
-    const auto &pdo = syncIt->second.pdos.at(pdo_index);
+    const auto &assigned_pdo = syncIt->second.pdos[pdo_pos];
+    const auto pdo_index = assigned_pdo.first;
+    const auto &pdo = assigned_pdo.second;
     const auto offset = pdo.findEntryByPos(entry_pos);
     if (offset == NotFound) {
         return -1;
@@ -1257,9 +1259,10 @@ ssize_t ec_domain::map(
     // manager at once, instead of only the requested one.
     const auto &sm = config.sync_managers.at(syncManager);
     ssize_t requested_offset = -1;
-    for (auto index : sm.pdo_order) {
+    for (const auto &assigned_pdo : sm.pdos) {
+        const auto index = assigned_pdo.first;
         const auto ans = data.size();
-        const auto size = sm.pdos.at(index).sizeInBytes();
+        const auto size = assigned_pdo.second.sizeInBytes();
         mapped_pdos.emplace_back(
                 ans, size, config.address, syncManager, index, sm.dir);
         data.resize(ans + size);
