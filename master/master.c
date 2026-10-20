@@ -44,6 +44,7 @@
 #include "device.h"
 #include "datagram.h"
 #include "smp.h"
+#include "mailbox.h"
 
 #ifdef EC_EOE
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
@@ -78,6 +79,11 @@
 /** SDO injection timeout in microseconds. */
 #define EC_SDO_INJECTION_TIMEOUT 10000
 
+/** SII caching mask (combination of valid flags). */
+#define EC_SII_CACHING_MASK \
+    (EC_SII_VENDOR | EC_SII_PRODUCT | \
+     EC_SII_REVISION | EC_SII_SERIAL | EC_SII_ALIAS)
+
 #ifdef EC_HAVE_CYCLES
 
 /** Frame timeout in cycles.
@@ -109,6 +115,7 @@ const unsigned int rate_intervals[] = {
 /****************************************************************************/
 
 void ec_master_clear_config(ec_master_t *);
+void ec_master_clear_sii_cache(ec_master_t *);
 void ec_master_clear_slave_configs(ec_master_t *);
 void ec_master_clear_domains(ec_master_t *);
 int ec_master_thread_start(ec_master_t *, int (*)(void *), const char *);
@@ -129,6 +136,9 @@ void ec_master_find_dc_ref_clock(ec_master_t *);
 void ec_master_clear_device_stats(ec_master_t *);
 void ec_master_update_device_stats(ec_master_t *);
 void ec_master_nanosleep(const unsigned long);
+int ec_master_cached_sii_page_matches(const ec_master_t *,
+        const ec_sii_page_t *, uint32_t, uint32_t, uint32_t, uint32_t,
+        uint16_t);
 static void sc_reset_task_kicker(struct irq_work *work);
 static void sc_reset_task(struct work_struct *work);
 
@@ -164,7 +174,8 @@ int ec_master_init(ec_master_t *master, /**< EtherCAT master */
         dev_t device_number, /**< Character device number. */
         struct class *class, /**< Device class. */
         unsigned int debug_level, /**< Debug level (module parameter). */
-        unsigned int run_on_cpu /**< bind created kernel threads to a cpu */
+        unsigned int run_on_cpu, /**< Bind created kernel threads to a cpu. */
+        unsigned int sii_caching /**< SII caching mode. */
         )
 {
     int ret;
@@ -203,6 +214,8 @@ int ec_master_init(ec_master_t *master, /**< EtherCAT master */
 
     master->slaves = NULL;
     master->slave_count = 0;
+
+    INIT_LIST_HEAD(&master->sii_cache);
 
     INIT_LIST_HEAD(&master->configs);
     INIT_LIST_HEAD(&master->domains);
@@ -245,6 +258,9 @@ int ec_master_init(ec_master_t *master, /**< EtherCAT master */
 
     master->debug_level = debug_level;
     master->run_on_cpu = run_on_cpu;
+    master->sii_caching = sii_caching & EC_SII_CACHING_MASK;
+    EC_MASTER_INFO(master, "Initialising master with SII caching set to %u.",
+            master->sii_caching);
     master->stats.timeouts = 0;
     master->stats.corrupted = 0;
     master->stats.unmatched = 0;
@@ -420,6 +436,7 @@ void ec_master_clear(
     ec_master_clear_domains(master);
     ec_master_clear_slave_configs(master);
     ec_master_clear_slaves(master);
+    ec_master_clear_sii_cache(master);
 
     ec_datagram_clear(&master->sync_mon_datagram);
     ec_datagram_clear(&master->sync_datagram);
@@ -456,6 +473,21 @@ void ec_master_clear_eoe_handlers(
     }
 }
 #endif
+
+/****************************************************************************/
+
+/** Clear SII page cache.
+ */
+void ec_master_clear_sii_cache(ec_master_t *master)
+{
+    ec_sii_page_t *page, *next;
+
+    list_for_each_entry_safe(page, next, &master->sii_cache, list) {
+        list_del(&page->list);
+        ec_sii_page_clear(page);
+        kfree(page);
+    }
+}
 
 /****************************************************************************/
 
@@ -970,8 +1002,10 @@ void ec_master_queue_datagram(
         }
     }
 
-    list_add_tail(&datagram->queue, &master->datagram_queue);
-    smp_store_release(&datagram->state, EC_DATAGRAM_QUEUED);
+    if (datagram->state != EC_DATAGRAM_UNUSED) {
+        list_add_tail(&datagram->queue, &master->datagram_queue);
+        smp_store_release(&datagram->state, EC_DATAGRAM_QUEUED);
+    }
 }
 
 /****************************************************************************/
@@ -1124,6 +1158,139 @@ void ec_master_send_datagrams(
 
 /****************************************************************************/
 
+/** Stores a received mailbox response in a protocol-specific buffer.
+ *
+ * \retval 0 The response was stored.
+ * \retval -ENOENT There is no buffer for the protocol.
+ * \retval -EOVERFLOW The response does not fit into the buffer.
+ */
+static int ec_master_mbox_store(
+        ec_mbox_data_t *mbox_data, /**< Mailbox response buffer. */
+        const uint8_t *data, /**< Received mailbox data. */
+        size_t size /**< Size of the received data. */
+        )
+{
+    if (!mbox_data->data) {
+        return -ENOENT;
+    }
+
+    if (size > mbox_data->data_size) {
+        return -EOVERFLOW;
+    }
+
+    memcpy(mbox_data->data, data, size);
+    smp_store_release(&mbox_data->payload_size, size);
+    return 0;
+}
+
+/****************************************************************************/
+
+/** Common mailbox dispatcher for mailboxes read via the station address.
+ *
+ * \return Non-zero, if the data were handled by the dispatcher, zero, if they
+ *         shall be copied into the datagram memory.
+ */
+static int ec_master_mbox_dispatch(
+        ec_master_t *master, /**< EtherCAT master. */
+        const uint8_t *data, /**< Received datagram data. */
+        size_t size, /**< Size of the received datagram data. */
+        uint16_t slave_addr, /**< Station address of the datagram. */
+        uint16_t offset_addr /**< Register offset of the datagram. */
+        )
+{
+    ec_slave_t *slave;
+    ec_mbox_data_t *mbox_data;
+    uint8_t mbox_prot;
+    int ret;
+
+    if (!EC_READ_U16(data + size)) { // working counter
+        return 0;
+    }
+
+    if (!master->slaves) {
+        EC_MASTER_DBG(master, 1, "No configured slaves!\n");
+        return 0;
+    }
+
+    for (slave = master->slaves;
+            slave < master->slaves + master->slave_count; slave++) {
+        if (slave->station_address == slave_addr) {
+            break;
+        }
+    }
+
+    if (slave == master->slaves + master->slave_count) {
+        EC_MASTER_DBG(master, 1, "No slave matching datagram"
+                " slave address: %u\n", slave_addr);
+        return 0;
+    }
+
+    // only complete reads of the TX mailbox are dispatched (and not, for
+    // example, register requests on the mailbox memory)
+    if (!slave->configured_tx_mailbox_offset ||
+            offset_addr != slave->configured_tx_mailbox_offset ||
+            size != slave->configured_tx_mailbox_size) {
+        return 0;
+    }
+
+    if (!slave->valid_mbox_data) {
+        return 0;
+    }
+
+    mbox_prot = EC_READ_U8(data + 5) & 0x0F;
+
+    switch (mbox_prot) {
+#ifdef EC_EOE
+        case EC_MBOX_TYPE_EOE:
+            mbox_data = &slave->mbox_eoe_data;
+            break;
+#endif
+        case EC_MBOX_TYPE_COE:
+            mbox_data = &slave->mbox_coe_data;
+            break;
+        case EC_MBOX_TYPE_FOE:
+            mbox_data = &slave->mbox_foe_data;
+            break;
+        case EC_MBOX_TYPE_SOE:
+            mbox_data = &slave->mbox_soe_data;
+            break;
+        case EC_MBOX_TYPE_VOE:
+            mbox_data = &slave->mbox_voe_data;
+            break;
+        default:
+            EC_MASTER_DBG(master, 1, "Unknown mailbox protocol"
+                    " from slave: %u Protocol: %u\n", slave_addr, mbox_prot);
+            return 0;
+    }
+
+    if (smp_load_acquire(&mbox_data->payload_size) && printk_ratelimit()) {
+        EC_SLAVE_WARN(slave, "Overwriting unfetched mailbox message of"
+                " protocol 0x%02X.\n", mbox_prot);
+    }
+
+    ret = ec_master_mbox_store(mbox_data, data, size);
+    if (ret == -ENOENT) {
+        if (printk_ratelimit()) {
+            EC_SLAVE_WARN(slave, "Ignoring mailbox message of protocol"
+                    " 0x%02X, which is not supported by the slave.\n",
+                    mbox_prot);
+        }
+        return 0;
+    } else if (ret == -EOVERFLOW) {
+        if (printk_ratelimit()) {
+            EC_SLAVE_WARN(slave, "Ignoring mailbox message of protocol"
+                    " 0x%02X, which exceeds the buffer size"
+                    " (%zu > %zu bytes).\n",
+                    mbox_prot, size, mbox_data->data_size);
+        }
+        return 0;
+    }
+
+    return 1;
+}
+
+/****************************************************************************/
+
 /** Processes a received frame.
  *
  * This function is called by the network driver for every received frame.
@@ -1139,6 +1306,7 @@ void ec_master_receive_datagrams(
 {
     size_t frame_size, data_size;
     uint8_t datagram_type, datagram_index;
+    uint16_t datagram_slave_addr, datagram_offset_addr;
     unsigned int cmd_follows, matched;
     const uint8_t *cur_data;
     ec_datagram_t *datagram;
@@ -1183,6 +1351,8 @@ void ec_master_receive_datagrams(
         // process datagram header
         datagram_type  = EC_READ_U8(cur_data);
         datagram_index = EC_READ_U8(cur_data + 1);
+        datagram_slave_addr  = EC_READ_U16(cur_data + 2);
+        datagram_offset_addr = EC_READ_U16(cur_data + 4);
         data_size      = EC_READ_U16(cur_data + 6) & 0x07FF;
         cmd_follows    = EC_READ_U16(cur_data + 6) & 0x8000;
         cur_data += EC_DATAGRAM_HEADER_SIZE;
@@ -1239,9 +1409,13 @@ void ec_master_receive_datagrams(
                 datagram->type != EC_DATAGRAM_FPWR &&
                 datagram->type != EC_DATAGRAM_BWR &&
                 datagram->type != EC_DATAGRAM_LWR) {
-            // copy received data into the datagram memory,
-            // if something has been read
-            memcpy(datagram->data, cur_data, data_size);
+            // mailbox responses are dispatched to their protocol buffers,
+            // everything else is copied into the datagram memory.
+            if (datagram->type != EC_DATAGRAM_FPRD ||
+                    !ec_master_mbox_dispatch(master, cur_data, data_size,
+                        datagram_slave_addr, datagram_offset_addr)) {
+                memcpy(datagram->data, cur_data, data_size);
+            }
         }
         cur_data += data_size;
 
@@ -1476,13 +1650,15 @@ void ec_master_exec_slave_fsms(
                 fsm->slave->ring_position);
 #endif
         if (ec_fsm_slave_exec(fsm, datagram)) {
-            // FSM consumed datagram
+            if (datagram->state != EC_DATAGRAM_UNUSED) {
+                // FSM consumed datagram
 #if DEBUG_INJECT
-            EC_MASTER_DBG(master, 1, "FSM consumed datagram %s\n",
-                    datagram->name);
+                EC_MASTER_DBG(master, 1, "FSM consumed datagram %s\n",
+                        datagram->name);
 #endif
-            master->ext_ring_idx_fsm =
-                (master->ext_ring_idx_fsm + 1) % EC_EXT_RING_SIZE;
+                master->ext_ring_idx_fsm =
+                    (master->ext_ring_idx_fsm + 1) % EC_EXT_RING_SIZE;
+            }
         }
         else {
             // FSM finished
@@ -1501,8 +1677,10 @@ void ec_master_exec_slave_fsms(
             datagram = ec_master_get_external_datagram(master);
 
             if (ec_fsm_slave_exec(&master->fsm_slave->fsm, datagram)) {
-                master->ext_ring_idx_fsm =
-                    (master->ext_ring_idx_fsm + 1) % EC_EXT_RING_SIZE;
+                if (datagram->state != EC_DATAGRAM_UNUSED) {
+                    master->ext_ring_idx_fsm =
+                        (master->ext_ring_idx_fsm + 1) % EC_EXT_RING_SIZE;
+                }
                 list_add_tail(&master->fsm_slave->fsm.list,
                         &master->fsm_exec_list);
                 master->fsm_exec_count++;
@@ -1737,7 +1915,9 @@ static int ec_master_eoe_thread(void *priv_data)
         all_idle = 1;
 
         list_for_each_entry(eoe, &master->eoe_handlers, list) {
-            if (ec_eoe_is_open(eoe)) {
+            // closed handlers have to finish a receive sequence to release
+            // the mailbox read lock
+            if (ec_eoe_is_open(eoe) || ec_eoe_holds_mbox_lock(eoe)) {
                 none_open = 0;
                 break;
             }
@@ -1851,6 +2031,46 @@ const ec_slave_t *ec_master_find_slave_const(
 {
     const ec_slave_t *slave = master->slaves;
     EC_FIND_SLAVE;
+}
+
+/** Finds the slave configuration that will be attached to the given slave.
+ *
+ * Unlike ec_slave_config_attach(), this does not actually attach the
+ * configuration; it just looks one up by alias/position (and, if given,
+ * matching vendor ID/product code), which also works before the bus scan
+ * has completed and configurations have been attached to their slaves.
+ *
+ * \return The matching slave configuration, or \a NULL, if none matches.
+ */
+ec_slave_config_t *ec_master_find_config_for_slave(
+        ec_master_t *master, /**< EtherCAT master. */
+        const ec_slave_t *slave /**< Slave to find a configuration for. */
+        )
+{
+    ec_slave_config_t *sc;
+
+    list_for_each_entry(sc, &master->configs, list) {
+        if (ec_master_find_slave(master, sc->alias, sc->position) != slave)
+            continue;
+
+#ifdef EC_IDENT_WILDCARDS
+        if (sc->vendor_id != 0xffffffff
+                && slave->sii.vendor_id != sc->vendor_id)
+            continue;
+        if (sc->product_code != 0xffffffff
+                && slave->sii.product_code != sc->product_code)
+            continue;
+#else
+        if (slave->sii.vendor_id != sc->vendor_id)
+            continue;
+        if (slave->sii.product_code != sc->product_code)
+            continue;
+#endif
+
+        return sc;
+    }
+
+    return NULL;
 }
 
 /****************************************************************************/
@@ -2100,6 +2320,30 @@ void ec_master_find_dc_ref_clock(
     if (ref) {
         EC_MASTER_INFO(master, "Using slave %u as DC reference clock.\n",
                 ref->ring_position);
+
+        // The cyclic time distribution datagram only writes to slaves behind
+        // the reference in frame order; DC slaves in front of it free-run.
+        {
+            unsigned int upstream_dc = 0;
+
+            for (slave = master->slaves; slave < ref; slave++) {
+                if (slave->base_dc_supported && slave->has_dc_system_time) {
+                    upstream_dc++;
+                    if (slave->config && slave->config->dc_assign_activate) {
+                        EC_SLAVE_WARN(slave, "Slave has DC sync configured,"
+                                " but is in front of the reference clock and"
+                                " will not receive cyclic time"
+                                " distribution!\n");
+                    }
+                }
+            }
+
+            if (upstream_dc) {
+                EC_MASTER_WARN(master, "%u DC-capable slave(s) in front of"
+                        " the reference clock will not receive cyclic time"
+                        " distribution.\n", upstream_dc);
+            }
+        }
     }
     else {
         EC_MASTER_INFO(master, "No DC reference clock found.\n");
@@ -2189,11 +2433,16 @@ void ec_master_calc_transmission_delays(
             slave < master->slaves + master->slave_count;
             slave++) {
         ec_slave_calc_port_delays(slave);
+        // Reset before the re-rootable walk below: with a non-default
+        // reference some slaves would otherwise keep stale delays from a
+        // previous reference if they are not revisited.
+        slave->transmission_delay = 0U;
     }
 
     if (master->dc_ref_clock) {
         uint32_t delay = 0;
-        ec_slave_calc_transmission_delays_rec(master->dc_ref_clock, &delay);
+        ec_slave_calc_transmission_delays_rec(master->dc_ref_clock, NULL,
+                &delay);
     }
 }
 
@@ -2244,6 +2493,143 @@ void ec_master_request_op(
     }
 }
 
+/****************************************************************************/
+
+/** Check if a cached SII page is matching the caching criteria.
+ *
+ * Returns non-zero if matching.
+ */
+int ec_master_cached_sii_page_matches(
+        const ec_master_t *master, /**< EtherCAT master. */
+        const ec_sii_page_t *cached_page, /**< SII page. */
+        uint32_t vendor_id,
+        uint32_t product_code,
+        uint32_t revision,
+        uint32_t serial,
+        uint16_t alias)
+{
+    if (!master->sii_caching) {
+        return 0;
+    }
+
+    if ((master->sii_caching & EC_SII_VENDOR) &&
+            cached_page->vendor_id != vendor_id) {
+        return 0;
+    }
+
+    if ((master->sii_caching & EC_SII_PRODUCT) &&
+            cached_page->product_code != product_code) {
+        return 0;
+    }
+
+    if ((master->sii_caching & EC_SII_REVISION) &&
+            cached_page->revision_number != revision) {
+        return 0;
+    }
+
+    if ((master->sii_caching & EC_SII_SERIAL) &&
+            (!serial || cached_page->serial_number != serial)) {
+        return 0;
+    }
+
+    if ((master->sii_caching & EC_SII_ALIAS) &&
+            (!alias || cached_page->alias != alias)) {
+        return 0;
+    }
+
+    return 1;
+}
+
+/****************************************************************************/
+
+/** Find a matching cached SII page.
+ *
+ * Returns pointer to the cached page, or zero if nothing usable found.
+ */
+ec_sii_page_t *ec_master_find_cached_sii_page(
+        const ec_master_t *master, /**< EtherCAT master. */
+        uint32_t vendor_id,
+        uint32_t product_code,
+        uint32_t revision,
+        uint32_t serial,
+        uint16_t alias)
+{
+    ec_sii_page_t *cached_page;
+
+    list_for_each_entry(cached_page, &master->sii_cache, list) {
+        if (ec_master_cached_sii_page_matches(master, cached_page,
+                    vendor_id, product_code, revision, serial, alias)) {
+            return cached_page;
+        }
+    }
+
+    return NULL;
+}
+
+/****************************************************************************/
+
+/** Add an SII page to the cache.
+ *
+ * If caching is disabled or the page already exists, it is not added.
+ *
+ * Returns non-zero on error.
+ */
+int ec_master_cache_sii_page(
+        ec_master_t *master, /**< EtherCAT master. */
+        const ec_sii_page_t *page /**< SII page. */
+        )
+{
+    ec_sii_page_t *cached_page;
+    int ret;
+
+    if (!master->sii_caching) {
+        return 0;
+    }
+
+    if ((master->sii_caching & EC_SII_SERIAL) && !page->serial_number) {
+        // only caching non-zero serial numbers
+        return 0;
+    }
+
+    if ((master->sii_caching & EC_SII_ALIAS) && !page->alias) {
+        // not caching non-zero alias addresses
+        return 0;
+    }
+
+    list_for_each_entry(cached_page, &master->sii_cache, list) {
+        if (ec_master_cached_sii_page_matches(master, cached_page,
+                    page->vendor_id, page->product_code,
+                    page->revision_number, page->serial_number,
+                    page->alias)) {
+            EC_MASTER_WARN(master, "Matching SII page already existing.\n");
+            return 0;
+        }
+    }
+
+    EC_MASTER_DBG(master, 1,
+            "Caching SII page for 0x%08X / 0x%08X / 0x%08X / 0x%08X / %u\n",
+            page->vendor_id, page->product_code, page->revision_number,
+            page->serial_number, page->alias);
+
+    if (!(cached_page = (ec_sii_page_t *)
+                kmalloc(sizeof(ec_sii_page_t), GFP_KERNEL))) {
+        EC_MASTER_ERR(master, "Error allocating SII page memory!\n");
+        return -ENOMEM;
+    }
+
+    ec_sii_page_init(cached_page);
+    cached_page->origin = EC_SII_PAGE_CACHED;
+
+    ret = ec_sii_page_copy(cached_page, page);
+    if (ret) {
+        EC_MASTER_ERR(master, "Failed to copy SII page!\n");
+        return ret;
+    }
+
+    list_add_tail(&cached_page->list, &master->sii_cache);
+    return 0;
+}
+
 /*****************************************************************************
  *  Application interface
  ****************************************************************************/
@@ -2259,8 +2645,7 @@ ec_domain_t *ecrt_master_create_domain_err(
     ec_domain_t *domain, *last_domain;
     unsigned int index;
 
-    EC_MASTER_DBG(master, 1, "ecrt_master_create_domain(master = 0x%p)\n",
-            master);
+    EC_MASTER_DBG(master, 1, "%s(master = 0x%p)\n", __func__, master);
 
     if (!(domain =
                 (ec_domain_t *) kmalloc(sizeof(ec_domain_t), GFP_KERNEL))) {
@@ -2308,7 +2693,7 @@ int ecrt_master_activate(ec_master_t *master)
     int eoe_was_running;
 #endif
 
-    EC_MASTER_DBG(master, 1, "ecrt_master_activate(master = 0x%p)\n", master);
+    EC_MASTER_DBG(master, 1, "%s(master = 0x%p)\n", __func__, master);
 
     if (master->active) {
         EC_MASTER_WARN(master, "%s: Master already active!\n", __func__);
@@ -2572,7 +2957,6 @@ ec_slave_config_t *ecrt_master_slave_config_err(ec_master_t *master,
     ec_slave_config_t *sc;
     unsigned int found = 0;
 
-
     EC_MASTER_DBG(master, 1, "ecrt_master_slave_config(master = 0x%p,"
             " alias = %u, position = %u, vendor_id = 0x%08x,"
             " product_code = 0x%08x)\n",
@@ -2637,18 +3021,22 @@ ec_slave_config_t *ecrt_master_slave_config(ec_master_t *master,
 int ecrt_master_select_reference_clock(ec_master_t *master,
         ec_slave_config_t *sc)
 {
-    if (sc) {
-        ec_slave_t *slave = sc->slave;
+    EC_MASTER_DBG(master, 1, "%s(master = 0x%p, sc = 0x%p)\n",
+            __func__, master, sc);
 
-        // output an early warning
-        if (slave &&
-                (!slave->base_dc_supported || !slave->has_dc_system_time)) {
-            EC_MASTER_WARN(master, "Slave %u can not act as"
-                    " a reference clock!", slave->ring_position);
-        }
+    if (down_interruptible(&master->master_sem)) {
+        return -EINTR;
     }
 
     master->dc_ref_config = sc;
+    // Re-run the full DC calculation, not just ec_master_find_dc_ref_clock():
+    // the reference pointer alone is not enough. calc_topology() and
+    // calc_transmission_delays() must recompute every slave's propagation
+    // delay relative to the newly selected reference, otherwise the cyclic
+    // write-system-times FSM keeps writing delays anchored on the old
+    // default reference and the selection has no effect on DC compensation.
+    ec_master_calc_dc(master);
+    up(&master->master_sem);
     return 0;
 }
 
@@ -2656,8 +3044,8 @@ int ecrt_master_select_reference_clock(ec_master_t *master,
 
 int ecrt_master(ec_master_t *master, ec_master_info_t *master_info)
 {
-    EC_MASTER_DBG(master, 1, "ecrt_master(master = 0x%p,"
-            " master_info = 0x%p)\n", master, master_info);
+    EC_MASTER_DBG(master, 1, "%s(master = 0x%p,"
+            " master_info = 0x%p)\n", __func__, master, master_info);
 
     master_info->slave_count = master->slave_count;
     master_info->link_up = master->devices[EC_DEVICE_MAIN].link_state;
@@ -2671,8 +3059,8 @@ int ecrt_master(ec_master_t *master, ec_master_info_t *master_info)
 int ecrt_master_scan_progress(ec_master_t *master,
         ec_master_scan_progress_t *progress)
 {
-    EC_MASTER_DBG(master, 1, "ecrt_master_scan_progress(master = 0x%p,"
-            " progress = 0x%p)\n", master, progress);
+    EC_MASTER_DBG(master, 1, "%s(master = 0x%p, progress = 0x%p)\n",
+            __func__, master, progress);
 
     progress->slave_count = master->slave_count;
     progress->scan_index = master->scan_index;
@@ -2746,9 +3134,9 @@ out_get_slave:
 void ecrt_master_callbacks(ec_master_t *master,
         void (*send_cb)(void *), void (*receive_cb)(void *), void *cb_data)
 {
-    EC_MASTER_DBG(master, 1, "ecrt_master_callbacks(master = 0x%p,"
+    EC_MASTER_DBG(master, 1, "%s(master = 0x%p,"
             " send_cb = 0x%p, receive_cb = 0x%p, cb_data = 0x%p)\n",
-            master, send_cb, receive_cb, cb_data);
+            __func__, master, send_cb, receive_cb, cb_data);
 
     master->app_send_cb = send_cb;
     master->app_receive_cb = receive_cb;
@@ -3308,6 +3696,30 @@ int ecrt_master_reset(ec_master_t *master)
 
 /****************************************************************************/
 
+int ecrt_master_sii_caching(ec_master_t *master,
+        ec_sii_caching_fields_t fields)
+{
+    fields &= EC_SII_CACHING_MASK;
+
+    if (master->sii_caching == fields) {
+        // no changes
+        return 0;
+    }
+
+    EC_MASTER_DBG(master, 1, "Setting SII caching fields to %u.\n",
+            fields);
+    master->sii_caching = fields;
+
+    if (!master->sii_caching) {
+        EC_MASTER_DBG(master, 1, "Clearing SII page cache.\n");
+        ec_master_clear_sii_cache(master);
+    }
+
+    return 0;
+}
+
+/****************************************************************************/
+
 static void sc_reset_task_kicker(struct irq_work *work)
 {
     struct ec_master *master =
@@ -3358,6 +3770,7 @@ EXPORT_SYMBOL(ecrt_master_sdo_upload);
 EXPORT_SYMBOL(ecrt_master_write_idn);
 EXPORT_SYMBOL(ecrt_master_read_idn);
 EXPORT_SYMBOL(ecrt_master_reset);
+EXPORT_SYMBOL(ecrt_master_sii_caching);
 
 /** \endcond */
 

@@ -1,6 +1,6 @@
 /*****************************************************************************
  *
- *  Copyright (C) 2006-2009  Florian Pose, Ingenieurgemeinschaft IgH
+ *  Copyright (C) 2006-2026  Florian Pose, Ingenieurgemeinschaft IgH
  *
  *  This file is part of the IgH EtherCAT Master.
  *
@@ -32,11 +32,14 @@ class CommandMaster:
     public:
         CommandMaster();
 
-        string helpString(const string &) const;
+        std::string helpString(const std::string &) const;
         void execute(const StringVector &);
 
     private:
         enum {ColWidth = 6};
+
+        void showMaster(MasterDevice &, const ec_ioctl_master_t &);
+        void showMasterJson(MasterDevice &, const ec_ioctl_master_t &);
 };
 
 /****************************************************************************/

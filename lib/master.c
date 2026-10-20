@@ -768,9 +768,13 @@ int ecrt_master_reference_clock_time(const ec_master_t *master,
 
     ret = ioctl(master->fd, EC_IOCTL_REF_CLOCK_TIME, time);
     if (EC_IOCTL_IS_ERROR(ret)) {
-        fprintf(stderr, "Failed to get reference clock time: %s\n",
-                strerror(EC_IOCTL_ERRNO(ret)));
-        return -EC_IOCTL_ERRNO(ret);
+        ret = EC_IOCTL_ERRNO(ret);
+        if (ret != EIO && ret != ENXIO && ret != EAGAIN) {
+            // do not log if no refclk or no refclk time yet
+            fprintf(stderr, "Failed to get reference clock time: %s\n",
+                    strerror(ret));
+        }
+        return -ret;
     }
 
     return ret;
@@ -816,6 +820,23 @@ int ecrt_master_reset(ec_master_t *master)
     if (EC_IOCTL_IS_ERROR(ret)) {
         return -EC_IOCTL_ERRNO(ret);
     }
+    return 0;
+}
+
+/****************************************************************************/
+
+int ecrt_master_sii_caching(ec_master_t *master,
+        ec_sii_caching_fields_t fields)
+{
+    int ret;
+
+    ret = ioctl(master->fd, EC_IOCTL_SII_CACHING, fields);
+    if (EC_IOCTL_IS_ERROR(ret)) {
+        fprintf(stderr, "Failed to set SII caching method: %s\n",
+                strerror(EC_IOCTL_ERRNO(ret)));
+        return -EC_IOCTL_ERRNO(ret);
+    }
+
     return 0;
 }
 

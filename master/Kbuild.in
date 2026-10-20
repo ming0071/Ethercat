@@ -1,6 +1,6 @@
 #-----------------------------------------------------------------------------
 #
-#  Copyright (C) 2006-2024  Florian Pose, Ingenieurgemeinschaft IgH
+#  Copyright (C) 2006-2026  Florian Pose, Ingenieurgemeinschaft IgH
 #
 #  This file is part of the IgH EtherCAT Master.
 #
@@ -42,6 +42,7 @@ ec_master-objs := \
 	fsm_coe.o \
 	fsm_foe.o \
 	fsm_master.o \
+	fsm_mbox.o \
 	fsm_pdo.o \
 	fsm_pdo_entry.o \
 	fsm_sii.o \
@@ -60,6 +61,7 @@ ec_master-objs := \
 	sdo.o \
 	sdo_entry.o \
 	sdo_request.o \
+	sii_page.o \
 	slave.o \
 	slave_config.o \
 	soe_errors.o \

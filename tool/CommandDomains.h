@@ -1,6 +1,6 @@
 /*****************************************************************************
  *
- *  Copyright (C) 2006-2009  Florian Pose, Ingenieurgemeinschaft IgH
+ *  Copyright (C) 2006-2026  Florian Pose, Ingenieurgemeinschaft IgH
  *
  *  This file is part of the IgH EtherCAT Master.
  *
@@ -32,12 +32,14 @@ class CommandDomains:
     public:
         CommandDomains();
 
-        string helpString(const string &) const;
+        std::string helpString(const std::string &) const;
         void execute(const StringVector &);
 
     protected:
         void showDomain(MasterDevice &, const ec_ioctl_master_t &,
                 const ec_ioctl_domain_t &, bool);
+        void showDomainJson(const ec_ioctl_master_t &,
+                const ec_ioctl_domain_t &);
 };
 
 /****************************************************************************/

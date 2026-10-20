@@ -1,6 +1,6 @@
 /*****************************************************************************
  *
- *  Copyright (C) 2006-2009  Florian Pose, Ingenieurgemeinschaft IgH
+ *  Copyright (C) 2006-2026  Florian Pose, Ingenieurgemeinschaft IgH
  *
  *  This file is part of the IgH EtherCAT Master.
  *
@@ -19,12 +19,21 @@
  *
  ****************************************************************************/
 
+#include "CommandDomains.h"
+
+#include "MasterDevice.h"
+
 #include <iostream>
 #include <iomanip>
-using namespace std;
 
-#include "CommandDomains.h"
-#include "MasterDevice.h"
+using std::string;
+using std::stringstream;
+using std::endl;
+using std::cout;
+using std::dec;
+using std::hex;
+using std::setw;
+using std::setfill;
 
 /****************************************************************************/
 
@@ -50,7 +59,8 @@ string CommandDomains::helpString(const string &binaryBaseName) const
         << endl << endl
         << "The domain's base address for the logical datagram" << endl
         << "(LRD/LWR/LRW) is displayed followed by the domain's" << endl
-        << "process data size in byte. The last values are the current" << endl
+        << "process data size in byte. The last values are the current"
+        << endl
         << "datagram working counter sum and the expected working" << endl
         << "counter sum. If the values are equal, all PDOs were" << endl
         << "exchanged during the last cycle." << endl
@@ -75,6 +85,11 @@ string CommandDomains::helpString(const string &binaryBaseName) const
         << "  --verbose -v          Show FMMUs and process data" << endl
         << "                        in addition." << endl
         << endl
+        << "The global --json option outputs the same summary" << endl
+        << "information as JSON, regardless of --verbose. For a" << endl
+        << "structured, JSON breakdown of the FMMUs and process data," << endl
+        << "see the 'data' command's --json option instead." << endl
+        << endl
         << numericInfo();
 
     return str.str();
@@ -84,10 +99,11 @@ string CommandDomains::helpString(const string &binaryBaseName) const
 
 void CommandDomains::execute(const StringVector &args)
 {
-	MasterIndexList masterIndices;
+    MasterIndexList masterIndices;
     bool doIndent;
     DomainList domains;
     DomainList::const_iterator di;
+    bool firstMaster = true;
 
     if (args.size()) {
         stringstream err;
@@ -95,8 +111,13 @@ void CommandDomains::execute(const StringVector &args)
         throwInvalidUsageException(err);
     }
 
-	masterIndices = getMasterIndices();
+    masterIndices = getMasterIndices();
     doIndent = masterIndices.size() > 1;
+
+    if (getJson()) {
+        jsonBegin("main_devices");
+    }
+
     MasterIndexList::const_iterator mi;
     for (mi = masterIndices.begin();
             mi != masterIndices.end(); mi++) {
@@ -106,6 +127,32 @@ void CommandDomains::execute(const StringVector &args)
         m.getMaster(&io);
         domains = selectedDomains(m, io);
 
+        if (getJson()) {
+            bool firstDomain = true;
+
+            if (!firstMaster) {
+                cout << "," << endl;
+            }
+            firstMaster = false;
+
+            cout << "    {" << endl
+                << "      \"main_device\": " << dec << *mi << "," << endl
+                << "      \"domains\": [" << endl;
+
+            for (di = domains.begin(); di != domains.end(); di++) {
+                if (!firstDomain) {
+                    cout << "," << endl;
+                }
+                firstDomain = false;
+                showDomainJson(io, *di);
+            }
+
+            cout << endl
+                << "      ]" << endl
+                << "    }";
+            continue;
+        }
+
         if (domains.size() && doIndent) {
             cout << "Master" << dec << *mi << endl;
         }
@@ -113,6 +160,10 @@ void CommandDomains::execute(const StringVector &args)
         for (di = domains.begin(); di != domains.end(); di++) {
             showDomain(m, io, *di, doIndent);
         }
+    }
+
+    if (getJson()) {
+        jsonEnd();
     }
 }
 
@@ -204,6 +255,38 @@ void CommandDomains::showDomain(
     }
 
     delete [] processData;
+}
+
+/****************************************************************************/
+
+void CommandDomains::showDomainJson(
+        const ec_ioctl_master_t &master,
+        const ec_ioctl_domain_t &domain
+        )
+{
+    unsigned int dev_idx, wc_sum = 0;
+
+    for (dev_idx = EC_DEVICE_MAIN; dev_idx < master.num_devices; dev_idx++) {
+        wc_sum += domain.working_counter[dev_idx];
+    }
+
+    cout << "        {" << endl
+        << "          \"index\": " << domain.index << "," << endl
+        << "          \"logical_base_address\": "
+        << domain.logical_base_address << "," << endl
+        << "          \"size\": " << domain.data_size << "," << endl
+        << "          \"working_counter\": " << wc_sum << "," << endl
+        << "          \"expected_working_counter\": "
+        << domain.expected_working_counter << "," << endl
+        << "          \"working_counter_per_device\": [";
+    for (dev_idx = EC_DEVICE_MAIN; dev_idx < master.num_devices; dev_idx++) {
+        cout << domain.working_counter[dev_idx];
+        if (dev_idx + 1 < master.num_devices) {
+            cout << ", ";
+        }
+    }
+    cout << "]" << endl
+        << "        }";
 }
 
 /****************************************************************************/

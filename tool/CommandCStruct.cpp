@@ -1,6 +1,6 @@
 /*****************************************************************************
  *
- *  Copyright (C) 2006-2009  Florian Pose, Ingenieurgemeinschaft IgH
+ *  Copyright (C) 2006-2026  Florian Pose, Ingenieurgemeinschaft IgH
  *
  *  This file is part of the IgH EtherCAT Master.
  *
@@ -21,13 +21,23 @@
  *
  ****************************************************************************/
 
+#include "CommandCStruct.h"
+
+#include "MasterDevice.h"
+
+#include <string.h>
+
 #include <iostream>
 #include <iomanip>
-#include <string.h>
-using namespace std;
 
-#include "CommandCStruct.h"
-#include "MasterDevice.h"
+using std::string;
+using std::stringstream;
+using std::endl;
+using std::dec;
+using std::hex;
+using std::setfill;
+using std::setw;
+using std::cout;
 
 /****************************************************************************/
 
@@ -139,7 +149,7 @@ void CommandCStruct::generateSlaveCStruct(
                 }
             pdos << "},";
             if (strlen((const char *) pdo.name)) {
-                pdos << " /* " << pdo.name << " */";
+                pdos << " /* " << toUtf8((const char *) pdo.name) << " */";
             }
             pdos << endl;
             entry_pos += pdo.entry_count;
@@ -153,7 +163,8 @@ void CommandCStruct::generateSlaveCStruct(
                     << ", " << dec << (unsigned int) entry.bit_length
                     << "},";
                 if (strlen((const char *) entry.name)) {
-                    entries << " /* " << entry.name << " */";
+                    entries << " /* " << toUtf8((const char *) entry.name)
+                        << " */";
                 }
                 entries << endl;
             }
@@ -163,7 +174,7 @@ void CommandCStruct::generateSlaveCStruct(
     cout
         << "/* Master " << m.getIndex() << ", Slave " << slave.position;
     if (strlen(slave.order)) {
-        cout << ", \"" << slave.order << "\"";
+        cout << ", \"" << toUtf8(slave.order) << "\"";
     }
 
     cout << endl
