@@ -260,6 +260,14 @@ size_t DataTypeHandler::interpretAsType(
             }
     }
 
+    if (type->byteSize && !str.eof()) {
+        // Allow trailing whitespace, e.g. a newline from standard input.
+        str >> std::ws;
+        if (!str.eof()) {
+            throw ios::failure("Invalid trailing characters");
+        }
+    }
+
 #if DEBUG
     printRawData(cerr, (const uint8_t *) target, dataSize);
 #endif

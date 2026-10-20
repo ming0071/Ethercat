@@ -126,4 +126,11 @@ ethercat_CXXFLAGS = \
 	-Wall -DREV=$(REV) \
 	-fno-strict-aliasing
 
+check_PROGRAMS = data_type_test
+TESTS = $(check_PROGRAMS)
+
+data_type_test_SOURCES = data_type_test.cpp DataTypeHandler.cpp
+data_type_test_CPPFLAGS = -I$(top_srcdir)/include
+data_type_test_CXXFLAGS = -Wall -fno-strict-aliasing
+
 #-----------------------------------------------------------------------------
